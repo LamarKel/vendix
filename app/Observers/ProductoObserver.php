@@ -6,15 +6,32 @@ namespace App\Observers;
 
 use App\Enums\TipoNotificacion;
 use App\Models\Producto;
+use App\Services\InventarioService;
 use App\Services\NotificacionService;
 use Filament\Notifications\Notification;
 
 class ProductoObserver
 {
+    /** Stock inicial cargado al crear el producto: va a la localidad de venta de la principal. */
+    public function created(Producto $producto): void
+    {
+        if ((float) $producto->stock !== 0.0) {
+            app(InventarioService::class)->sincronizarDiferencia($producto, (string) $producto->stock);
+        }
+    }
+
     public function updated(Producto $producto): void
     {
         if (! $producto->wasChanged('stock')) {
             return;
+        }
+
+        // Cambio de stock por fuera de InventarioService: mantener el desglose por localidad.
+        if (! InventarioService::$moviendo && $producto->controla_stock !== false) {
+            app(InventarioService::class)->sincronizarDiferencia(
+                $producto,
+                bcsub((string) $producto->stock, (string) ($producto->getOriginal('stock') ?? 0), 3),
+            );
         }
 
         if (! $producto->controla_stock || (float) $producto->stock > (float) $producto->stock_minimo) {

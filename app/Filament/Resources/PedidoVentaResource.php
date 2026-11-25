@@ -48,7 +48,9 @@ class PedidoVentaResource extends Resource
 
     public static function getEloquentQuery(): Builder
     {
-        return parent::getEloquentQuery()->with(['vendedor:id,name', 'cobradoPor:id,name', 'venta:id,ncf']);
+        return parent::getEloquentQuery()
+            ->where('pedidos_venta.empresa_id', Filament::getTenant()?->id)
+            ->with(['vendedor:id,name', 'cobradoPor:id,name', 'venta:id,ncf']);
     }
 
     public static function table(Table $table): Table

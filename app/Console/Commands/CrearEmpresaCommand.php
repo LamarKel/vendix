@@ -81,6 +81,7 @@ class CrearEmpresaCommand extends Command
 
             $roles->sembrarRolesBase($empresa);
             $modulos->sembrarModulos($empresa);
+            $empresa->config()->update(['compras_a_recepcion' => true]);
 
             return $empresa;
         });

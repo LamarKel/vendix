@@ -29,7 +29,7 @@ class User extends Authenticatable implements FilamentUser, HasDefaultTenant, Ha
     use LogsActivity;
 
     protected $fillable = [
-        'empresa_id',
+        'empresa_id', 'sucursal_id',
         'es_super_admin',
         'name',
         'email',
@@ -192,5 +192,10 @@ class User extends Authenticatable implements FilamentUser, HasDefaultTenant, Ha
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
             ->useLogName('Usuarios');
+    }
+
+    public function sucursal(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Sucursal::class);
     }
 }

@@ -51,6 +51,12 @@ class UserResource extends Resource
                 ->unique(ignoreRecord: true)
                 ->maxLength(255),
 
+            Select::make('sucursal_id')
+                ->label('Sucursal')
+                ->helperText('Sucursal donde trabaja: vende de su Tienda y solo ve el detalle por localidad de esa sucursal.')
+                ->relationship('sucursal', 'nombre', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()?->id)->where('activa', true))
+                ->placeholder('Sucursal principal'),
+
             TextInput::make('password')
                 ->label('Contraseña')
                 ->password()

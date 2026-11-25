@@ -27,6 +27,7 @@ class CompraService
         private readonly CuentaPorPagarService $cuentaPorPagarService,
         private readonly CostoPrecioService $costoPrecioService,
         private readonly OrdenCompraService $ordenCompraService,
+        private readonly LocalidadService $localidades,
     ) {}
 
     /**
@@ -104,7 +105,24 @@ class CompraService
                 ? ($datos['fecha_vencimiento'] ?? now()->addDays(30)->toDateString())
                 : null;
 
+            // Sucursal que recibe: la indicada (revalidada) o la del usuario. La mercancía entra a la
+            // localidad elegida si es de esa sucursal; si no, a Recepción (o Venta, según config).
+            $sucursal = filled($datos['sucursal_id'] ?? null)
+                ? \App\Models\Sucursal::where('empresa_id', $empresa->id)->where('activa', true)->find($datos['sucursal_id'])
+                : null;
+            $sucursal ??= $this->localidades->sucursalDe($empresa, \App\Models\User::where('empresa_id', $empresa->id)->find($userId));
+
+            $localidadEntrada = null;
+            if (filled($datos['localidad_id'] ?? null)) {
+                $localidadEntrada = $this->localidades->localidadDeEmpresa($empresa, (int) $datos['localidad_id']);
+                if ($localidadEntrada->sucursal_id !== $sucursal->id) {
+                    throw new RuntimeException('La localidad de entrada no pertenece a la sucursal que recibe.');
+                }
+            }
+            $localidadEntrada ??= $this->inventarioService->localidadDeCompras($empresa, $sucursal);
+
             $compra = Compra::create([
+                'sucursal_id' => $sucursal->id,
                 // Se deriva del proveedor (ya cargado arriba) en vez de depender de que
                 // Filament haya asociado el tenant automáticamente: este service puede
                 // invocarse fuera del ciclo de vida de una request de panel (colas, comandos,
@@ -144,6 +162,7 @@ class CompraService
                         (string) $linea['cantidad'],
                         $compra->id,
                         $userId,
+                        localidad: $localidadEntrada,
                     );
 
                     // El costo (sin ITBIS) se actualiza según el método de costo de la empresa:
@@ -217,6 +236,7 @@ class CompraService
                         $compra->id,
                         $userId,
                         "Anulación compra #{$compra->id}",
+                        localidad: $this->localidadDeEntrada($compra, $producto->id),
                     );
 
                     // Con promedio ponderado, saca del promedio lo que esta compra había metido.
@@ -250,6 +270,22 @@ class CompraService
      *
      * Público porque CompraResource lo reutiliza para previsualizar totales en vivo.
      */
+    /**
+     * Localidad donde entró el producto de esta compra (anular/devolver saca de ahí). Si ya lo
+     * movieron, la salida falla por stock insuficiente: hay que devolverlo primero a esa localidad.
+     */
+    public function localidadDeEntrada(Compra $compra, int $productoId): ?\App\Models\Localidad
+    {
+        $localidadId = \App\Models\MovimientoInventario::query()
+            ->where('empresa_id', $compra->empresa_id)
+            ->whereIn('origen', [OrigenMovimiento::COMPRA->value, OrigenMovimiento::RECEPCION_ORDEN_COMPRA->value])
+            ->where('referencia_id', $compra->id)
+            ->where('producto_id', $productoId)
+            ->value('localidad_id');
+
+        return $localidadId !== null ? \App\Models\Localidad::find($localidadId) : null;
+    }
+
     public function calcularLineas(array $lineas, bool $itbisIncluido, Empresa $empresa): array
     {
         return array_map(function (array $l) use ($itbisIncluido, $empresa) {

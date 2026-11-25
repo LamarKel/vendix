@@ -17,7 +17,7 @@ class Compra extends Model
 
     protected $fillable = [
 
-        'empresa_id', 'proveedor_id', 'pedido_compra_id', 'orden_compra_id', 'user_id',
+        'empresa_id', 'sucursal_id', 'proveedor_id', 'pedido_compra_id', 'orden_compra_id', 'user_id',
         'tipo_comprobante', 'ncf', 'fecha',
         'itbis_incluido', 'monto_total_factura', 'tipo_pago', 'fecha_vencimiento',
         'subtotal', 'monto_gravado_18', 'monto_gravado_16', 'monto_gravado_0', 'monto_exento',
@@ -99,5 +99,10 @@ class Compra extends Model
     public function estaAnulada(): bool
     {
         return $this->estado === EstadoCompra::ANULADA;
+    }
+
+    public function sucursal(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Sucursal::class);
     }
 }

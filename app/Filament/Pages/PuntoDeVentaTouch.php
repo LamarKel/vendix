@@ -260,7 +260,7 @@ class PuntoDeVentaTouch extends PuntoDeVenta
                     'precio_texto' => number_format((float) $precio, 2).($esPesado ? ' / '.$producto->unidad_base : ''),
                     'pesado' => $esPesado,
                     // Con "vender sin stock" activo el botón no se bloquea (al tocarlo sale el aviso).
-                    'agotado' => $producto->controla_stock && (float) $producto->stock <= 0 && ! $this->permiteVenderSinStock(),
+                    'agotado' => $producto->controla_stock && $this->stockEnVenta($producto->id) <= 0 && ! $this->permiteVenderSinStock(),
                 ];
             });
     }
@@ -563,5 +563,10 @@ class PuntoDeVentaTouch extends PuntoDeVenta
         if ($caja !== null) {
             Cache::forget($caja->claveCacheDisplay());
         }
+    }
+
+    protected function cajaParaSucursal(): ?\App\Models\Caja
+    {
+        return $this->cajaSeleccionada();
     }
 }

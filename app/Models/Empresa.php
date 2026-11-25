@@ -41,6 +41,9 @@ class Empresa extends Model implements HasName
                 $empresa->slug = static::slugUnico($empresa->razon_social);
             }
         });
+
+        // Toda empresa nace con su sucursal principal y sus localidades (Tienda, Recibo, Almacén).
+        static::created(fn (Empresa $empresa) => app(\App\Services\LocalidadService::class)->asegurarEstructura($empresa));
     }
 
     private static function slugUnico(string $razonSocial): string
@@ -54,6 +57,16 @@ class Empresa extends Model implements HasName
         }
 
         return $slug;
+    }
+
+    public function sucursales(): HasMany
+    {
+        return $this->hasMany(Sucursal::class);
+    }
+
+    public function localidades(): HasMany
+    {
+        return $this->hasMany(Localidad::class);
     }
 
     public function users(): HasMany

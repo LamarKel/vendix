@@ -72,6 +72,9 @@ class ManageFacturacion extends Page
             'color_primario' => $config->color_primario,
             'color_secundario' => $config->color_secundario,
             'color_accent_pos' => $config->color_accent_pos,
+            'compras_a_recepcion' => $config->compras_a_recepcion,
+            'requisicion_sucursal_requiere_aprobacion' => $config->requisicion_sucursal_requiere_aprobacion,
+            'dias_alerta_recepcion' => $config->dias_alerta_recepcion,
             'textos_documentos' => collect(DocumentoImpreso::cases())->mapWithKeys(
                 fn (DocumentoImpreso $doc) => [$doc->value => collect($doc->campos())->mapWithKeys(
                     fn (string $campo) => [$campo => $config->textoDocumento($doc, $campo)]
@@ -206,6 +209,24 @@ class ManageFacturacion extends Page
                             ->required(fn (Get $get): bool => (bool) $get('acepta_devoluciones'))
                             ->visible(fn (Get $get): bool => (bool) $get('acepta_devoluciones'))
                             ->columnSpanFull(),
+                    ]),
+
+                Section::make('Inventario por sucursal')
+                    ->description('Cómo entra y se mueve la mercancía entre localidades y sucursales.')
+                    ->columnSpanFull()
+                    ->columns(2)
+                    ->schema([
+                        Toggle::make('compras_a_recepcion')
+                            ->label('Las compras entran a la localidad de recepción')
+                            ->helperText('Encendido: toda compra entra a "Recibo" y alguien la ubica en el almacén. Apagado: entra directo a la localidad de venta.')
+                            ->columnSpanFull(),
+                        Toggle::make('requisicion_sucursal_requiere_aprobacion')
+                            ->label('Las requisiciones entre sucursales requieren aprobación')
+                            ->helperText('Encendido: un encargado las aprueba antes de que el almacén pueda despachar. Dentro de la misma sucursal nunca llevan aprobación.')
+                            ->columnSpanFull(),
+                        TextInput::make('dias_alerta_recepcion')
+                            ->label('Avisar si hay mercancía en recepción sin ubicar por más de (días)')
+                            ->numeric()->integer()->minValue(1)->maxValue(60)->required(),
                     ]),
 
                 Section::make('Punto de venta')

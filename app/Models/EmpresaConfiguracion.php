@@ -52,6 +52,9 @@ class EmpresaConfiguracion extends Model
         'color_primario',
         'color_secundario',
         'color_accent_pos',
+        'compras_a_recepcion',
+        'requisicion_sucursal_requiere_aprobacion',
+        'dias_alerta_recepcion',
         'textos_documentos',
     ];
 
@@ -72,6 +75,9 @@ class EmpresaConfiguracion extends Model
         'devolucion_reembolsos' => 'array',
         'devolucion_monto_supervisor' => 'decimal:2',
         'textos_documentos' => 'array',
+        'compras_a_recepcion' => 'boolean',
+        'requisicion_sucursal_requiere_aprobacion' => 'boolean',
+        'dias_alerta_recepcion' => 'integer',
     ];
 
     // Reflejan los defaults de la columna en la migración: sin esto, un ::create()/firstOrCreate()
@@ -94,6 +100,9 @@ class EmpresaConfiguracion extends Model
         'color_primario' => '#00C9D7',
         'color_secundario' => '#101820',
         'color_accent_pos' => '#e85d9a',
+        'compras_a_recepcion' => false,
+        'requisicion_sucursal_requiere_aprobacion' => false,
+        'dias_alerta_recepcion' => 3,
     ];
 
     /**

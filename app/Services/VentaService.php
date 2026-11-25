@@ -44,6 +44,7 @@ class VentaService
         private readonly InventarioService $inventarioService,
         private readonly CuentaPorCobrarService $cuentaPorCobrarService,
         private readonly PromocionService $promocionService,
+        private readonly LocalidadService $localidades,
     ) {}
 
     /**
@@ -114,6 +115,15 @@ class VentaService
             }
 
             $cajaId = $this->resolverCaja($datos['caja_id'] ?? null, $empresa);
+
+            // Sucursal de la venta: la de la caja, si no la del usuario, si no la principal. La
+            // venta descuenta de la localidad de VENTA de esa sucursal (lo comparten todas sus cajas).
+            $sucursal = $this->localidades->sucursalDe(
+                $empresa,
+                filled($datos['user_id'] ?? null) ? User::where('empresa_id', $empresa->id)->find($datos['user_id']) : null,
+                $cajaId !== null ? Caja::find($cajaId) : null,
+            );
+            $localidadVenta = $this->localidades->localidadDeVenta($sucursal);
 
             $sinComprobante = (bool) ($datos['sin_comprobante'] ?? false);
 
@@ -221,6 +231,7 @@ class VentaService
                 'vuelto' => $datos['vuelto'] ?? null,
                 'arqueo_caja_id' => $datos['arqueo_caja_id'] ?? null,
                 'caja_id' => $cajaId,
+                'sucursal_id' => $sucursal->id,
                 // Lo fija quien llama (POS, heladería, lavandería...), nunca el navegador.
                 'origen' => $this->resolverOrigen($datos['origen'] ?? null),
                 'tipo_pago' => $tipoPago,
@@ -267,6 +278,7 @@ class VentaService
                     $venta->id,
                     $datos['user_id'] ?? null,
                     permitirNegativo: $permitirNegativo,
+                    localidad: $localidadVenta,
                 );
             }
 
@@ -419,6 +431,7 @@ class VentaService
                         $venta->id,
                         $userId,
                         $motivo,
+                        localidad: $this->localidadVentaDe($venta),
                     );
                 }
             }
@@ -449,6 +462,7 @@ class VentaService
         $notaCredito = Venta::create([
             'empresa_id' => $venta->empresa_id,
             'origen' => $venta->origen,
+            'sucursal_id' => $venta->sucursal_id,
             'cliente_id' => $venta->cliente_id,
             'user_id' => $userId,
             'tipo_comprobante' => TipoComprobante::NOTA_CREDITO,
@@ -570,6 +584,7 @@ class VentaService
             $notaDebito = Venta::create([
                 'empresa_id' => $empresa->id,
                 'origen' => $ventaOriginal->origen,
+                'sucursal_id' => $ventaOriginal->sucursal_id,
                 'cliente_id' => $ventaOriginal->cliente_id,
                 'user_id' => auth()->id(),
                 'tipo_comprobante' => $tipoNota,
@@ -836,6 +851,7 @@ class VentaService
             $notaCredito = Venta::create([
                 'empresa_id' => $empresa->id,
                 'origen' => $ventaOriginal->origen,
+                'sucursal_id' => $ventaOriginal->sucursal_id,
                 'cliente_id' => $ventaOriginal->cliente_id,
                 'user_id' => $usuario?->id,
                 'tipo_comprobante' => $tipoNota,
@@ -883,6 +899,7 @@ class VentaService
                     $notaCredito->id,
                     $usuario?->id,
                     $motivo,
+                    localidad: $this->localidadVentaDe($ventaOriginal),
                 );
 
                 // Dañado o vencido: no vuelve a la venta. Sale como merma, con su costo, para que
@@ -896,6 +913,7 @@ class VentaService
                         $notaCredito->id,
                         $usuario?->id,
                         "Merma por devolución: {$motivo}",
+                        localidad: $this->localidadVentaDe($ventaOriginal),
                     );
                 }
             }
@@ -973,6 +991,16 @@ class VentaService
      *
      * @throws VentaInvalidaException
      */
+    /** Localidad de venta de la sucursal donde se hizo la venta (devoluciones y anulaciones vuelven ahí). */
+    private function localidadVentaDe(Venta $venta): \App\Models\Localidad
+    {
+        $sucursal = $venta->sucursal_id !== null
+            ? \App\Models\Sucursal::where('empresa_id', $venta->empresa_id)->find($venta->sucursal_id)
+            : null;
+
+        return $this->localidades->localidadDeVenta($sucursal ?? $this->localidades->principal($venta->empresa));
+    }
+
     private function resolverCaja(int|string|null $cajaId, Empresa $empresa): ?int
     {
         if (blank($cajaId)) {

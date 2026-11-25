@@ -104,6 +104,7 @@ class RolesEmpresaService
                 // Es quien repone: la única alerta que le toca. Vendedor no recibe ninguna
                 // (las de NCF, e-CF y cuentas son del Administrador).
                 'notificaciones.stock_bajo',
+                'inventario.ver_localidades',
             ]);
 
         });

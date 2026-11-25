@@ -28,7 +28,7 @@ class Venta extends Model
 
     protected $fillable = [
         'origen',
-        'empresa_id', 'cliente_id', 'user_id', 'tipo_comprobante', 'ncf', 'ncf_modifica',
+        'empresa_id', 'sucursal_id', 'cliente_id', 'user_id', 'tipo_comprobante', 'ncf', 'ncf_modifica',
         'venta_modificada_id', 'tipo_pago', 'fecha_limite_pago',
         'forma_pago', 'monto_efectivo', 'monto_tarjeta', 'monto_transferencia', 'vuelto',
         'arqueo_caja_id', 'caja_id',
@@ -234,5 +234,10 @@ class Venta extends Model
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
             ->useLogName('Ventas');
+    }
+
+    public function sucursal(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Sucursal::class);
     }
 }

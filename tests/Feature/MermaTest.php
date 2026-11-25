@@ -267,7 +267,7 @@ class MermaTest extends TestCase
             ->callAction('registrarMermas', data: [
                 'lineas' => [['producto_id' => $this->tomate->id, 'cantidad' => 500, 'motivo' => 'danado', 'nota' => null]],
             ])
-            ->assertNotified('Stock insuficiente para «Tomate»: disponible 150.000, solicitado 500.000.');
+            ->assertNotified('Stock insuficiente para «Tomate» en Tienda: disponible 150.000, solicitado 500.000.');
 
         $undo();
 

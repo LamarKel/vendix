@@ -65,6 +65,12 @@ class CajaResource extends Resource
                 ->unique(ignoreRecord: true, modifyRuleUsing: fn ($rule) => $rule->where('empresa_id', Filament::getTenant()->id))
                 ->validationMessages(['unique' => 'Ya existe una caja con este código.']),
 
+            Select::make('sucursal_id')
+                ->label('Sucursal')
+                ->helperText('La caja vende de la localidad de venta de esta sucursal.')
+                ->relationship('sucursal', 'nombre', modifyQueryUsing: fn ($query) => $query->where('empresa_id', Filament::getTenant()->id)->where('activa', true))
+                ->placeholder('Sucursal principal'),
+
             TextInput::make('mensaje_display')
                 ->label('Mensaje del display del cliente')
                 ->placeholder('¡Gracias por su compra!')

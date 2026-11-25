@@ -450,7 +450,7 @@ class PuntoDeVenta extends Page
             'imagen' => $producto->imagen,
             'precio_texto' => 'RD$ '.number_format((float) $presentacion->precio, 2),
             'controla_stock' => $producto->controla_stock,
-            'stock' => (float) $producto->stock,
+            'stock' => $this->stockEnVenta($producto->id),
         ];
     }
 
@@ -465,7 +465,7 @@ class PuntoDeVenta extends Page
             'imagen' => $producto->imagen,
             'precio_texto' => 'RD$ '.number_format((float) $producto->precio, 2),
             'controla_stock' => $producto->controla_stock,
-            'stock' => (float) $producto->stock,
+            'stock' => $this->stockEnVenta($producto->id),
         ];
     }
 
@@ -480,7 +480,7 @@ class PuntoDeVenta extends Page
             'imagen' => $producto->imagen,
             'precio_texto' => 'RD$ '.number_format((float) $producto->precio_por_peso, 2).' / '.$producto->unidad_base,
             'controla_stock' => $producto->controla_stock,
-            'stock' => (float) $producto->stock,
+            'stock' => $this->stockEnVenta($producto->id),
         ];
     }
 
@@ -675,7 +675,7 @@ class PuntoDeVenta extends Page
             return null;
         }
 
-        return (float) (Producto::query()->where('empresa_id', $this->empresaId())->find($linea['producto_id'])?->stock ?? 0);
+        return $this->stockEnVenta((int) $linea['producto_id']);
     }
 
     /**
@@ -710,7 +710,7 @@ class PuntoDeVenta extends Page
             return false;
         }
 
-        if ($producto->controla_stock && (float) $producto->stock <= 0) {
+        if ($producto->controla_stock && $this->stockEnVenta($producto->id) <= 0) {
             if ($this->permiteVenderSinStock()) {
                 Notification::make()
                     ->title("«{$producto->nombre}» no tiene stock en el sistema")
@@ -1428,6 +1428,43 @@ class PuntoDeVenta extends Page
             'total_itbis' => '0.00',
             'total' => '0.00',
         ];
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Sucursal y localidad de venta
+    // ──────────────────────────────────────────────────────────────────────
+
+    /** @var array<int, float> existencia en la localidad de venta, por producto (cache de la petición) */
+    protected array $cacheStockVenta = [];
+
+    protected ?\App\Models\Localidad $cacheLocalidadVenta = null;
+
+    /** Caja con la que se vende (el POS táctil usa la caja elegida). */
+    protected function cajaParaSucursal(): ?\App\Models\Caja
+    {
+        return $this->arqueoAbierto()?->caja;
+    }
+
+    /** Localidad de la que descuenta este POS: la de venta de la sucursal de la caja o del usuario. */
+    public function localidadVenta(): \App\Models\Localidad
+    {
+        return $this->cacheLocalidadVenta ??= app(\App\Services\LocalidadService::class)->localidadDeVenta(
+            app(\App\Services\LocalidadService::class)->sucursalDe($this->empresa(), auth()->user(), $this->cajaParaSucursal())
+        );
+    }
+
+    /** Existencia del producto en la localidad de venta (lo que de verdad se puede vender aquí). */
+    public function stockEnVenta(int $productoId): float
+    {
+        if (! array_key_exists($productoId, $this->cacheStockVenta)) {
+            $this->cacheStockVenta[$productoId] = (float) (\App\Models\StockLocalidad::query()
+                ->where('empresa_id', $this->empresaId())
+                ->where('localidad_id', $this->localidadVenta()->id)
+                ->where('producto_id', $productoId)
+                ->value('cantidad') ?? 0);
+        }
+
+        return $this->cacheStockVenta[$productoId];
     }
 
     // ──────────────────────────────────────────────────────────────────────

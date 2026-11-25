@@ -259,4 +259,20 @@ class PedidoVentaTest extends TestCase
         $this->assertCount(0, $pos->instance()->pedidosPendientes());
         $this->assertFalse(TomarPedido::canAccess());
     }
+
+    public function test_el_listado_de_pedidos_solo_muestra_los_de_la_empresa(): void
+    {
+        $propio = $this->crearPedido();
+        $otra = Empresa::factory()->create();
+        $productoOtra = Producto::withoutGlobalScopes()->create([
+            'empresa_id' => $otra->id, 'codigo' => 'X', 'nombre' => 'Arena', 'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 1, 'precio' => 2, 'tasa_itbis' => TasaItbis::DIECIOCHO, 'controla_stock' => false, 'activo' => true,
+        ]);
+        $ajeno = $this->crearPedido(empresa: $otra, productoId: $productoOtra->id);
+
+        Livewire::actingAs($this->admin)
+            ->test(\App\Filament\Resources\PedidoVentaResource\Pages\ListPedidosVenta::class)
+            ->assertCanSeeTableRecords([$propio])
+            ->assertCanNotSeeTableRecords([$ajeno]);
+    }
 }

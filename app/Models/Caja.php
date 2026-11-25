@@ -20,7 +20,7 @@ class Caja extends Model
 {
     use LogsActivity;
 
-    protected $fillable = ['empresa_id', 'nombre', 'codigo', 'mensaje_display', 'modo_impresion_pos', 'activo'];
+    protected $fillable = ['empresa_id', 'sucursal_id', 'nombre', 'codigo', 'mensaje_display', 'modo_impresion_pos', 'activo'];
 
     // El token nunca viaja en toArray()/JSON de rutina: es la credencial del display público.
     protected $hidden = ['display_token'];
@@ -98,5 +98,10 @@ class Caja extends Model
             ->logOnlyDirty()
             ->dontSubmitEmptyLogs()
             ->useLogName('Cajas');
+    }
+
+    public function sucursal(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Sucursal::class);
     }
 }

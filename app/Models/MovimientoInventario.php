@@ -17,9 +17,9 @@ class MovimientoInventario extends Model
     protected $table = 'movimientos_inventario';
 
     protected $fillable = [
-        'empresa_id', 'producto_id', 'tipo', 'origen', 'motivo', 'referencia_id',
+        'empresa_id', 'producto_id', 'localidad_id', 'tipo', 'origen', 'motivo', 'referencia_id',
         'revierte_movimiento_id', 'cantidad', 'costo_unitario', 'stock_anterior', 'stock_nuevo',
-        'user_id', 'observacion', 'dejo_stock_negativo',
+        'user_id', 'observacion', 'dejo_stock_negativo', 'stock_localidad_anterior', 'stock_localidad_nuevo',
     ];
 
     protected $casts = [
@@ -29,6 +29,8 @@ class MovimientoInventario extends Model
         'cantidad' => 'decimal:3',
         'costo_unitario' => 'decimal:2',
         'stock_anterior' => 'decimal:3',
+        'stock_localidad_anterior' => 'decimal:3',
+        'stock_localidad_nuevo' => 'decimal:3',
         'stock_nuevo' => 'decimal:3',
         'dejo_stock_negativo' => 'boolean',
     ];
@@ -78,5 +80,10 @@ class MovimientoInventario extends Model
         $costo = $this->costo_unitario ?? $this->producto?->costo ?? '0';
 
         return bcmul((string) $this->cantidad, (string) $costo, 2);
+    }
+
+    public function localidad(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Localidad::class);
     }
 }

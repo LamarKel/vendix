@@ -50,6 +50,7 @@ enum PerfilEmpresa: string
                 Modulo::VENTAS_PEDIDOS,
                 Modulo::INVENTARIO_KARDEX,
                 Modulo::INVENTARIO_MERMAS,
+                Modulo::INVENTARIO_LOCALIDADES,
                 Modulo::COMPRAS,
                 Modulo::COMPRAS_PEDIDOS,
                 Modulo::COMPRAS_STOCK_BAJO,

@@ -31,6 +31,7 @@ enum Modulo: string
 
     case INVENTARIO_KARDEX = 'inventario_kardex';
     case INVENTARIO_MERMAS = 'inventario_mermas';
+    case INVENTARIO_LOCALIDADES = 'inventario_localidades';
 
     case COMPRAS = 'compras';
     case COMPRAS_PEDIDOS = 'compras_pedidos';
@@ -64,6 +65,7 @@ enum Modulo: string
             self::VENTAS_PEDIDOS => 'Pedidos a caja (vendedor de piso)',
             self::INVENTARIO_KARDEX => 'Kardex',
             self::INVENTARIO_MERMAS => 'Mermas',
+            self::INVENTARIO_LOCALIDADES => 'Sucursales y localidades',
             self::COMPRAS => 'Compras',
             self::COMPRAS_PEDIDOS => 'Órdenes de Compra',
             self::COMPRAS_STOCK_BAJO => 'Stock Bajo',
@@ -91,7 +93,7 @@ enum Modulo: string
             self::VENTAS_POS, self::VENTAS_LISTADO, self::VENTAS_ARQUEO_CAJA,
             self::VENTAS_CAJAS, self::VENTAS_PEDIDOS => 'Ventas',
 
-            self::INVENTARIO_KARDEX, self::INVENTARIO_MERMAS => 'Inventario',
+            self::INVENTARIO_KARDEX, self::INVENTARIO_MERMAS, self::INVENTARIO_LOCALIDADES => 'Inventario',
 
             self::COMPRAS, self::COMPRAS_PEDIDOS,
             self::COMPRAS_STOCK_BAJO, self::DEVOLUCIONES => 'Compras',

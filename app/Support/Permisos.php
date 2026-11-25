@@ -85,6 +85,7 @@ class Permisos
                 'inventario.ajustar' => 'Ajustar stock',
                 'inventario.mermas' => 'Registrar y ver mermas',
                 'inventario.mermas_anular' => 'Anular mermas',
+                'inventario.ver_localidades' => 'Ver existencia por localidad de su sucursal',
             ],
             'Compras' => [
                 'compras.ver' => 'Ver compras',
@@ -120,6 +121,7 @@ class Permisos
             ],
             'Configuración' => [
                 'empresa.administrar' => 'Administrar datos de la empresa',
+                'sucursales.administrar' => 'Administrar sucursales y localidades',
                 'facturacion.administrar' => 'Administrar configuración de facturación',
                 'secuencias.administrar' => 'Administrar secuencias NCF',
                 'impresoras.administrar' => 'Administrar impresoras',

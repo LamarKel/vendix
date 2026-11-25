@@ -136,6 +136,7 @@ class DevolucionCompraService
                         $devolucion->id,
                         $userId,
                         "Devolución a proveedor de compra #{$compra->id}",
+                        localidad: app(CompraService::class)->localidadDeEntrada($compra, $producto->id),
                     );
                 }
             }
@@ -177,6 +178,12 @@ class DevolucionCompraService
                         $devolucion->id,
                         $userId,
                         "Anulación devolución #{$devolucion->id}",
+                        localidad: \App\Models\Localidad::find(\App\Models\MovimientoInventario::query()
+                            ->where('empresa_id', $devolucion->empresa_id)
+                            ->where('origen', OrigenMovimiento::DEVOLUCION_COMPRA->value)
+                            ->where('referencia_id', $devolucion->id)
+                            ->where('producto_id', $producto->id)
+                            ->value('localidad_id')),
                     );
                 }
             }

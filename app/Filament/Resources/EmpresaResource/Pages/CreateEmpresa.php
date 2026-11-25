@@ -48,6 +48,9 @@ class CreateEmpresa extends CreateRecord
         try {
             app(RolesEmpresaService::class)->sembrarRolesBase($record);
             app(ModulosEmpresaService::class)->sembrarModulos($record);
+
+            // Empresas nuevas: las compras entran a Recibo y se ubican desde ahí.
+            $record->config()->update(['compras_a_recepcion' => true]);
         } catch (\Throwable $e) {
             report($e);
 

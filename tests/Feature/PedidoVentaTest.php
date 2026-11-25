@@ -1,0 +1,262 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Enums\EstadoPedidoVenta;
+use App\Enums\Modulo;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoProducto;
+use App\Filament\Pages\PuntoDeVenta;
+use App\Filament\Pages\TomarPedido;
+use App\Models\Empresa;
+use App\Models\PedidoVenta;
+use App\Models\Producto;
+use App\Models\SecuenciaNcf;
+use App\Models\User;
+use App\Models\Venta;
+use App\Services\ArqueoCajaService;
+use App\Services\ModulosEmpresaService;
+use App\Services\PedidoVentaService;
+use App\Services\RolesEmpresaService;
+use Database\Seeders\RolePermissionSeeder;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Livewire\Livewire;
+use RuntimeException;
+use Tests\TestCase;
+
+/**
+ * Pedidos a caja: el vendedor de piso arma el pedido a nombre del cliente, la caja lo busca por
+ * nombre y lo cobra. No se cobra dos veces, no cruza empresas y el precio lo decide la base.
+ */
+class PedidoVentaTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private Producto $producto;
+
+    private User $admin;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        $this->seed(RolePermissionSeeder::class);
+
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO_FISICA->value,
+            'prefijo' => 'B02',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 1000,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $this->producto = Producto::create([
+            'codigo' => 'CEM-1', 'nombre' => 'Cemento gris', 'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 400, 'precio' => 500, 'tasa_itbis' => TasaItbis::DIECIOCHO,
+            'controla_stock' => true, 'stock' => 100, 'stock_minimo' => 0, 'activo' => true,
+        ]);
+
+        $this->admin = User::factory()->create();
+        app(RolesEmpresaService::class)->asignarAdministrador($this->admin, $this->empresaDefault);
+    }
+
+    private function crearPedido(string $nombre = 'Juan Pérez', float $cantidad = 2, ?Empresa $empresa = null, ?int $productoId = null): PedidoVenta
+    {
+        return app(PedidoVentaService::class)->crear(
+            $empresa ?? $this->empresaDefault,
+            $this->admin,
+            $nombre,
+            [['producto_id' => $productoId ?? $this->producto->id, 'cantidad' => $cantidad]],
+        );
+    }
+
+    public function test_el_vendedor_envia_el_pedido_a_caja_desde_tomar_pedido(): void
+    {
+        Livewire::actingAs($this->admin)
+            ->test(TomarPedido::class)
+            ->call('agregarProducto', $this->producto->id)
+            ->set('carrito.0.cantidad', 3)
+            ->set('nombreCliente', '  Juan   Pérez ')
+            ->call('enviarACaja')
+            ->assertSet('carrito', [])
+            ->assertSet('nombreCliente', '');
+
+        $pedido = PedidoVenta::sole();
+        $this->assertSame('Juan Pérez', $pedido->nombre_cliente);
+        $this->assertSame(EstadoPedidoVenta::PENDIENTE, $pedido->estado);
+        $this->assertSame(1, $pedido->numero);
+        $this->assertEquals(3, (float) $pedido->detalles->sole()->cantidad);
+        $this->assertEquals(1500, (float) $pedido->total_estimado);
+        $this->assertSame($this->empresaDefault->id, $pedido->empresa_id);
+    }
+
+    public function test_sin_nombre_no_se_envia(): void
+    {
+        Livewire::actingAs($this->admin)
+            ->test(TomarPedido::class)
+            ->call('agregarProducto', $this->producto->id)
+            ->set('nombreCliente', '   ')
+            ->call('enviarACaja');
+
+        $this->assertSame(0, PedidoVenta::count());
+    }
+
+    public function test_tomar_pedido_no_cobra(): void
+    {
+        Livewire::actingAs($this->admin)
+            ->test(TomarPedido::class)
+            ->call('agregarProducto', $this->producto->id)
+            ->call('cobrar');
+
+        $this->assertSame(0, Venta::count());
+    }
+
+    public function test_la_numeracion_es_correlativa_por_empresa(): void
+    {
+        $otra = Empresa::factory()->create();
+        $productoOtra = Producto::withoutGlobalScopes()->create([
+            'empresa_id' => $otra->id, 'codigo' => 'X', 'nombre' => 'Arena', 'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 1, 'precio' => 2, 'tasa_itbis' => TasaItbis::DIECIOCHO, 'controla_stock' => false, 'activo' => true,
+        ]);
+
+        $this->assertSame(1, $this->crearPedido()->numero);
+        $this->assertSame(2, $this->crearPedido()->numero);
+        $this->assertSame(1, $this->crearPedido(empresa: $otra, productoId: $productoOtra->id)->numero);
+    }
+
+    public function test_rechaza_productos_de_otra_empresa(): void
+    {
+        $otra = Empresa::factory()->create();
+        $ajeno = Producto::withoutGlobalScopes()->create([
+            'empresa_id' => $otra->id, 'codigo' => 'AJ', 'nombre' => 'Ajeno', 'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 1, 'precio' => 2, 'tasa_itbis' => TasaItbis::DIECIOCHO, 'controla_stock' => false, 'activo' => true,
+        ]);
+
+        $this->expectException(RuntimeException::class);
+
+        $this->crearPedido(productoId: $ajeno->id);
+    }
+
+    public function test_la_caja_busca_por_nombre_o_numero(): void
+    {
+        $juan = $this->crearPedido('Juan Pérez');
+        $this->crearPedido('María Rodríguez');
+
+        $servicio = app(PedidoVentaService::class);
+
+        $this->assertSame([$juan->id], $servicio->pendientes($this->empresaDefault, 'juan')->pluck('id')->all());
+        $this->assertSame([$juan->id], $servicio->pendientes($this->empresaDefault, 'P-0001')->pluck('id')->all());
+        $this->assertCount(2, $servicio->pendientes($this->empresaDefault));
+        // Un comodín de LIKE escrito por el cajero no lista todo.
+        $this->assertCount(0, $servicio->pendientes($this->empresaDefault, '%'));
+    }
+
+    public function test_la_caja_carga_el_pedido_y_lo_cobra(): void
+    {
+        $pedido = $this->crearPedido(cantidad: 2);
+        app(ArqueoCajaService::class)->abrir('0', $this->admin->id, $this->empresaDefault);
+
+        $pos = Livewire::actingAs($this->admin)
+            ->test(PuntoDeVenta::class)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO_FISICA->value)
+            ->call('cargarPedido', $pedido->id)
+            ->assertSet('pedidoId', $pedido->id)
+            ->assertSet('carrito.0.producto_id', $this->producto->id);
+
+        // Precio manipulado en el navegador: se cobra el de la base.
+        $pos->set('carrito.0.precio_unitario', '1')
+            ->set('formaPago', 'efectivo')
+            ->set('montoEfectivo', '2000')
+            ->call('cobrar')
+            ->assertSet('pedidoId', null);
+
+        $pedido->refresh();
+        $this->assertSame(EstadoPedidoVenta::COBRADO, $pedido->estado);
+        $this->assertNotNull($pedido->venta_id);
+        $this->assertSame($this->admin->id, $pedido->cobrado_por);
+        $this->assertEquals(1000, (float) $pedido->venta->subtotal);
+        $this->assertEquals(98, (float) $this->producto->fresh()->stock);
+    }
+
+    public function test_un_pedido_ya_cobrado_no_llega_a_registrar_otra_venta(): void
+    {
+        $pedido = $this->crearPedido();
+        // Simula que otra caja lo cobró un instante antes.
+        $pedido->update(['estado' => EstadoPedidoVenta::COBRADO, 'cobrado_en' => now()]);
+
+        $llamadas = 0;
+
+        try {
+            app(PedidoVentaService::class)->cobrar($this->empresaDefault, $pedido->id, $this->admin->id, function () use (&$llamadas) {
+                $llamadas++;
+
+                return new Venta;
+            });
+            $this->fail('Debió rechazar el cobro de un pedido ya cobrado.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('ya fue', $e->getMessage());
+        }
+
+        $this->assertSame(0, $llamadas);
+    }
+
+    public function test_si_la_venta_falla_el_pedido_sigue_pendiente(): void
+    {
+        $pedido = $this->crearPedido();
+
+        try {
+            app(PedidoVentaService::class)->cobrar($this->empresaDefault, $pedido->id, $this->admin->id, fn () => throw new RuntimeException('Sin NCF'));
+        } catch (RuntimeException) {
+        }
+
+        $this->assertSame(EstadoPedidoVenta::PENDIENTE, $pedido->fresh()->estado);
+    }
+
+    public function test_no_se_cobra_un_pedido_de_otra_empresa(): void
+    {
+        $otra = Empresa::factory()->create();
+        $productoOtra = Producto::withoutGlobalScopes()->create([
+            'empresa_id' => $otra->id, 'codigo' => 'X', 'nombre' => 'Arena', 'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 1, 'precio' => 2, 'tasa_itbis' => TasaItbis::DIECIOCHO, 'controla_stock' => false, 'activo' => true,
+        ]);
+        $ajeno = $this->crearPedido(empresa: $otra, productoId: $productoOtra->id);
+
+        $this->assertNull(app(PedidoVentaService::class)->pendienteParaCargar($this->empresaDefault, $ajeno->id));
+
+        Livewire::actingAs($this->admin)
+            ->test(PuntoDeVenta::class)
+            ->call('cargarPedido', $ajeno->id)
+            ->assertSet('pedidoId', null)
+            ->assertSet('carrito', []);
+
+        $this->expectException(RuntimeException::class);
+        app(PedidoVentaService::class)->cobrar($this->empresaDefault, $ajeno->id, $this->admin->id, fn () => new Venta);
+    }
+
+    public function test_cancelar_exige_motivo_y_solo_pendientes(): void
+    {
+        $pedido = $this->crearPedido();
+        $servicio = app(PedidoVentaService::class);
+
+        $servicio->cancelar($pedido, $this->empresaDefault, $this->admin->id, 'El cliente se fue');
+        $this->assertSame(EstadoPedidoVenta::CANCELADO, $pedido->fresh()->estado);
+        $this->assertCount(0, $servicio->pendientes($this->empresaDefault));
+
+        $this->expectException(RuntimeException::class);
+        $servicio->cancelar($pedido->fresh(), $this->empresaDefault, $this->admin->id, 'otra vez');
+    }
+
+    public function test_con_el_modulo_apagado_la_caja_no_ve_pedidos(): void
+    {
+        $this->crearPedido();
+        app(ModulosEmpresaService::class)->actualizarModulos($this->empresaDefault, [Modulo::VENTAS_PEDIDOS->value => false]);
+
+        $pos = Livewire::actingAs($this->admin)->test(PuntoDeVenta::class);
+
+        $this->assertCount(0, $pos->instance()->pedidosPendientes());
+        $this->assertFalse(TomarPedido::canAccess());
+    }
+}

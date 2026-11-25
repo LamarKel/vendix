@@ -74,6 +74,12 @@ class Permisos
                 'gestionar_arqueo_caja' => 'Gestionar arqueo de caja',
                 'arqueo.cerrar_ajeno' => 'Cerrar cajas de otros cajeros (no solo la propia)',
             ],
+            'Pedidos a caja' => [
+                'pedidos.crear' => 'Tomar pedidos y enviarlos a caja (vendedor de piso)',
+                'pedidos.ver' => 'Ver pedidos',
+                'pedidos.cobrar' => 'Buscar y cobrar pedidos en caja',
+                'pedidos.cancelar' => 'Cancelar pedidos pendientes',
+            ],
             'Inventario' => [
                 'kardex.ver' => 'Ver kardex de movimientos',
                 'inventario.ajustar' => 'Ajustar stock',

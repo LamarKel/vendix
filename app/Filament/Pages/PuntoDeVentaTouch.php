@@ -417,6 +417,8 @@ class PuntoDeVentaTouch extends PuntoDeVenta
     public function cancelarVenta(): void
     {
         $this->carrito = [];
+        $this->pedidoId = null;
+        $this->pedidoEtiqueta = '';
         $this->descuentoId = '';
         $this->busquedaProducto = '';
         $this->ventaACredito = false;

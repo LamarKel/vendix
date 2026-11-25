@@ -47,6 +47,7 @@ enum PerfilEmpresa: string
                 Modulo::MAESTROS_LISTAS_PRECIO,
                 Modulo::COTIZACIONES,
                 Modulo::VENTAS_ARQUEO_CAJA,
+                Modulo::VENTAS_PEDIDOS,
                 Modulo::INVENTARIO_KARDEX,
                 Modulo::INVENTARIO_MERMAS,
                 Modulo::COMPRAS,

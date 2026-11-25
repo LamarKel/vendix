@@ -27,6 +27,7 @@ enum Modulo: string
     case VENTAS_LISTADO = 'ventas_listado';
     case VENTAS_ARQUEO_CAJA = 'ventas_arqueo_caja';
     case VENTAS_CAJAS = 'ventas_cajas';
+    case VENTAS_PEDIDOS = 'ventas_pedidos';
 
     case INVENTARIO_KARDEX = 'inventario_kardex';
     case INVENTARIO_MERMAS = 'inventario_mermas';
@@ -60,6 +61,7 @@ enum Modulo: string
             self::VENTAS_LISTADO => 'Ventas',
             self::VENTAS_ARQUEO_CAJA => 'Arqueos de Caja',
             self::VENTAS_CAJAS => 'Cajas registradoras (POS táctil y display)',
+            self::VENTAS_PEDIDOS => 'Pedidos a caja (vendedor de piso)',
             self::INVENTARIO_KARDEX => 'Kardex',
             self::INVENTARIO_MERMAS => 'Mermas',
             self::COMPRAS => 'Compras',
@@ -87,7 +89,7 @@ enum Modulo: string
             self::COTIZACIONES => 'Comercial',
 
             self::VENTAS_POS, self::VENTAS_LISTADO, self::VENTAS_ARQUEO_CAJA,
-            self::VENTAS_CAJAS => 'Ventas',
+            self::VENTAS_CAJAS, self::VENTAS_PEDIDOS => 'Ventas',
 
             self::INVENTARIO_KARDEX, self::INVENTARIO_MERMAS => 'Inventario',
 

@@ -62,6 +62,9 @@ class RolesEmpresaService
                 // ventas/compras.
                 'cxc.ver',
                 'cxc.cobrar',
+                'pedidos.crear',
+                'pedidos.ver',
+                'pedidos.cobrar',
                 'cotizaciones.ver',
                 'cotizaciones.crear',
                 'cotizaciones.editar',

@@ -39,6 +39,47 @@
 
       <div class="pos-grid">
       <div class="pos-main">
+        {{-- Pedidos a caja --}}
+        @if ($this->puedeCobrarPedidos())
+          <div class="card">
+            @if ($pedidoId)
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span class="badge badge-success">Cobrando pedido</span>
+                  <strong>{{ $pedidoEtiqueta }}</strong>
+                </div>
+                <button type="button" class="btn btn-secondary" wire:click="soltarPedido">Soltar pedido</button>
+              </div>
+            @else
+              <h3 class="card-title">Pedidos en espera</h3>
+              <input
+                type="text"
+                class="form-input"
+                placeholder="¿A nombre de quién? Escribe el nombre o el número del pedido..."
+                wire:model.live.debounce.300ms="busquedaPedido"
+              />
+              @php $pedidos = $this->pedidosPendientes(); @endphp
+              @if ($pedidos->isNotEmpty())
+                <ul class="pos-resultados" wire:poll.15s>
+                  @foreach ($pedidos as $pedido)
+                    <li wire:key="pedido-{{ $pedido->id }}">
+                      <button type="button" wire:click="cargarPedido({{ $pedido->id }})">
+                        <span><strong>{{ $pedido->nombre_cliente }}</strong> <span class="pos-muted">{{ $pedido->etiquetaNumero() }}</span></span>
+                        <span class="pos-muted">
+                          {{ $pedido->detalles_count }} art. · RD$ {{ number_format((float) $pedido->total_estimado, 2) }}
+                          · {{ $pedido->vendedor?->name }} · {{ $pedido->created_at->diffForHumans() }}
+                        </span>
+                      </button>
+                    </li>
+                  @endforeach
+                </ul>
+              @elseif ($busquedaPedido !== '')
+                <p class="pos-muted mt-2">No hay pedidos pendientes con ese nombre.</p>
+              @endif
+            @endif
+          </div>
+        @endif
+
         {{-- Cliente --}}
         <div class="card">
           <h3 class="card-title">Cliente</h3>

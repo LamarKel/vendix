@@ -25,6 +25,7 @@ use App\Models\Venta;
 use App\Services\ArqueoCajaService;
 use App\Services\Dgii\ConsultaContribuyenteService;
 use App\Services\Impresion\ImpresionService;
+use App\Services\PedidoVentaService;
 use App\Services\PromocionService;
 use App\Services\SaldoFavorService;
 use App\Services\SecuenciaNcfService;
@@ -112,6 +113,17 @@ class PuntoDeVenta extends Page
 
     /** @var array<string, string> */
     public array $totales = [];
+
+    /**
+     * Pedido a caja cargado en el carrito. Lo puede reescribir el navegador: al cobrar,
+     * PedidoVentaService vuelve a comprobar que sea de esta empresa y siga pendiente.
+     */
+    public ?int $pedidoId = null;
+
+    /** Texto informativo del pedido cargado ("P-0015 — Juan Pérez"). */
+    public string $pedidoEtiqueta = '';
+
+    public string $busquedaPedido = '';
 
     public static function modulo(): Modulo
     {
@@ -649,6 +661,8 @@ class PuntoDeVenta extends Page
     public function limpiarCarrito(): void
     {
         $this->carrito = [];
+        $this->pedidoId = null;
+        $this->pedidoEtiqueta = '';
         $this->descuentoId = '';
         $this->descuentoGlobal = '0.00';
         $this->busquedaProducto = '';
@@ -973,8 +987,14 @@ class PuntoDeVenta extends Page
             $this->descuentoId = '';
         }
 
+        if ($this->pedidoId !== null && ! $this->puedeCobrarPedidos()) {
+            Notification::make()->title('No tienes permiso para cobrar pedidos.')->danger()->send();
+
+            return;
+        }
+
         try {
-            $venta = app(VentaService::class)->registrar([
+            $registrar = fn (): Venta => app(VentaService::class)->registrar([
                 'origen' => static::origenVenta(),
                 'cliente_id' => $this->clienteId,
                 'user_id' => auth()->id(),
@@ -989,6 +1009,12 @@ class PuntoDeVenta extends Page
                 'lineas' => $this->lineasParaService(),
                 ...$this->datosAdicionalesVenta(),
             ], $this->empresa());
+
+            // Pedido a caja: se bloquea y se marca cobrado en la MISMA transacción que la venta,
+            // así dos cajeros no pueden cobrar el mismo pedido.
+            $venta = $this->pedidoId !== null
+                ? app(PedidoVentaService::class)->cobrar($this->empresa(), $this->pedidoId, (int) auth()->id(), $registrar)
+                : $registrar();
         } catch (ValidationException $e) {
             throw $e;
         } catch (\Throwable $e) {
@@ -1051,6 +1077,8 @@ class PuntoDeVenta extends Page
         }
 
         $this->carrito = [];
+        $this->pedidoId = null;
+        $this->pedidoEtiqueta = '';
         $this->descuentoId = '';
         $this->descuentoGlobal = '0.00';
         $this->busquedaProducto = '';
@@ -1400,6 +1428,96 @@ class PuntoDeVenta extends Page
             'total_itbis' => '0.00',
             'total' => '0.00',
         ];
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Pedidos a caja
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function puedeCobrarPedidos(): bool
+    {
+        return $this->empresa()->tieneModulo(Modulo::VENTAS_PEDIDOS)
+            && (bool) auth()->user()?->can('pedidos.cobrar');
+    }
+
+    /** @return \Illuminate\Database\Eloquent\Collection<int, \App\Models\PedidoVenta> */
+    public function pedidosPendientes(): \Illuminate\Database\Eloquent\Collection
+    {
+        if (! $this->puedeCobrarPedidos()) {
+            return new \Illuminate\Database\Eloquent\Collection;
+        }
+
+        return app(PedidoVentaService::class)->pendientes($this->empresa(), $this->busquedaPedido);
+    }
+
+    /**
+     * Carga un pedido pendiente en el carrito (reemplaza lo que hubiera). Solo se copian producto,
+     * presentación y cantidad: precio y factor salen de sanearCarrito(), igual que en cualquier venta.
+     */
+    public function cargarPedido(int $pedidoId): void
+    {
+        if (! $this->puedeCobrarPedidos()) {
+            Notification::make()->title('No tienes permiso para cobrar pedidos.')->danger()->send();
+
+            return;
+        }
+
+        $pedido = app(PedidoVentaService::class)->pendienteParaCargar($this->empresa(), $pedidoId);
+
+        if ($pedido === null) {
+            Notification::make()->title('Ese pedido ya no está pendiente.')->warning()->send();
+
+            return;
+        }
+
+        $this->carrito = [];
+
+        foreach ($pedido->detalles as $detalle) {
+            $producto = $detalle->producto;
+
+            if ($producto === null || ! $producto->activo) {
+                continue;
+            }
+
+            $esPesado = $producto->tipo_venta === TipoVenta::PESADO;
+
+            $this->carrito[] = [
+                'producto_id' => $producto->id,
+                'presentacion_id' => $esPesado ? null : $detalle->presentacion_id,
+                'codigo' => $detalle->presentacion?->codigo_barra ?? $producto->codigo,
+                'nombre' => $detalle->descripcion,
+                'precio_unitario' => (string) $detalle->precio_estimado,
+                'cantidad' => $esPesado ? (string) $detalle->cantidad : (string) (float) $detalle->cantidad,
+                'descuento' => '0.00',
+                'controla_stock' => $producto->controla_stock,
+                'factor' => (string) ($detalle->presentacion?->factor ?? 1),
+                'tipo_venta' => $esPesado ? TipoVenta::PESADO->value : TipoVenta::CONTABLE->value,
+                'unidad_base' => $producto->unidad_base,
+            ];
+        }
+
+        $this->pedidoId = $pedido->id;
+        $this->pedidoEtiqueta = "{$pedido->etiquetaNumero()} — {$pedido->nombre_cliente}";
+
+        if ($pedido->cliente_id !== null) {
+            $this->clienteId = $pedido->cliente_id;
+        }
+
+        $this->busquedaPedido = '';
+        $this->recalcularTotales();
+
+        if (count($this->carrito) < $pedido->detalles->count()) {
+            Notification::make()
+                ->title('Algunos productos del pedido ya no están activos y no se cargaron.')
+                ->warning()
+                ->send();
+        }
+    }
+
+    /** Suelta el pedido cargado sin cobrarlo: vuelve a quedar pendiente para otra caja. */
+    public function soltarPedido(): void
+    {
+        $this->limpiarCarrito();
     }
 
     /** @return array<int, array<string, mixed>> */

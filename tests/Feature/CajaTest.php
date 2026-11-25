@@ -6,6 +6,7 @@ use App\Enums\TasaItbis;
 use App\Enums\TipoComprobante;
 use App\Enums\TipoProducto;
 use App\Filament\Pages\Caja;
+use App\Models\Descuento;
 use App\Models\Producto;
 use App\Models\Role;
 use App\Models\SecuenciaNcf;
@@ -146,5 +147,25 @@ class CajaTest extends TestCase
             ->call('agregarProducto', $producto->id)
             ->set('carrito.0.cantidad', '2.9')
             ->assertSet('carrito.0.cantidad', 2);
+    }
+
+    /** La Caja hereda la regla del POS: sin descuento libre por línea y el global exige PIN. */
+    public function test_la_caja_no_tiene_descuento_libre_y_el_global_pide_pin(): void
+    {
+        $producto = $this->producto();
+        $descuento = Descuento::create([
+            'empresa_id' => $this->empresaDefault->id, 'nombre' => 'Empleado', 'porcentaje' => 10, 'activo' => true,
+        ]);
+
+        $cajero = $this->cajero();
+        app(\App\Services\ArqueoCajaService::class)->abrir('500.00', $cajero->id, $this->empresaDefault);
+
+        Livewire::actingAs($cajero)
+            ->test(Caja::class)
+            ->call('agregarProducto', $producto->id)
+            ->assertDontSeeHtml('.descuento"')
+            ->set('descuentoId', (string) $descuento->id)
+            ->assertSee('PIN del supervisor')
+            ->assertSet('totales.descuento', '0.00');
     }
 }

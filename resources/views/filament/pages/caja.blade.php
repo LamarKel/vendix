@@ -164,7 +164,6 @@
                     <th>Descripción</th>
                     <th class="pos-num">Cant.</th>
                     <th class="pos-num">Precio</th>
-                    <th class="pos-num">Desc.</th>
                     <th class="pos-num">Subtotal</th>
                     <th></th>
                   </tr>
@@ -192,15 +191,6 @@
                         />
                       </td>
                       <td class="pos-num">RD$ {{ number_format((float) $linea['precio_unitario'], 2) }}</td>
-                      <td class="pos-num">
-                        <input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          class="form-input"
-                          wire:model.live.debounce.400ms="carrito.{{ $indice }}.descuento"
-                        />
-                      </td>
                       <td class="pos-num">RD$ {{ number_format((float) $this->subtotalLinea($linea), 2) }}</td>
                       <td>
                         <button type="button" class="btn btn-danger" wire:click="quitarLinea({{ $indice }})">
@@ -229,6 +219,19 @@
                 <option value="{{ $descuento->id }}">{{ $descuento->nombre }} ({{ number_format((float) $descuento->porcentaje, 2) }}%)</option>
               @endforeach
             </select>
+            {{-- Solo descuentos de la tabla maestra y con PIN de supervisor (ver PuntoDeVenta). --}}
+            @if (filled($descuentoId))
+              @if ($this->descuentoAutorizado())
+                <p class="pos-muted mt-1">✔ Autorizado por <strong>{{ $descuentoAutorizadoNombre }}</strong></p>
+              @else
+                <div class="flex gap-2 mt-1" x-data="{ pin: '' }">
+                  <input type="password" inputmode="numeric" maxlength="8" class="form-input" placeholder="PIN del supervisor" x-model="pin" autocomplete="off"
+                    x-on:keydown.enter.prevent="$wire.autorizarDescuento(pin); pin = ''" />
+                  <button type="button" class="btn btn-primary" x-on:click="$wire.autorizarDescuento(pin); pin = ''">Autorizar</button>
+                </div>
+                <p class="pos-alerta mt-1" style="font-size:.8rem">El descuento no se aplica hasta que un supervisor lo autorice.</p>
+              @endif
+            @endif
           </div>
 
           <dl>

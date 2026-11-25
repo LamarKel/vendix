@@ -59,6 +59,7 @@ class EmpresaConfiguracion extends Model
         'antirrobo_umbral_descuentos',
         'antirrobo_umbral_devoluciones',
         'antirrobo_umbral_ajustes',
+        'conteo_umbral_aprobacion_admin',
         'textos_documentos',
     ];
 
@@ -86,6 +87,7 @@ class EmpresaConfiguracion extends Model
         'antirrobo_umbral_descuentos' => 'decimal:2',
         'antirrobo_umbral_devoluciones' => 'integer',
         'antirrobo_umbral_ajustes' => 'decimal:2',
+        'conteo_umbral_aprobacion_admin' => 'decimal:2',
     ];
 
     // Reflejan los defaults de la columna en la migración: sin esto, un ::create()/firstOrCreate()
@@ -115,6 +117,7 @@ class EmpresaConfiguracion extends Model
         'antirrobo_umbral_descuentos' => '1000',
         'antirrobo_umbral_devoluciones' => 3,
         'antirrobo_umbral_ajustes' => '2000',
+        'conteo_umbral_aprobacion_admin' => '5000',
     ];
 
     /**

@@ -19,6 +19,8 @@ enum OrigenMovimiento: string
     case REQUISICION_RECEPCION = 'requisicion_recepcion';
     /** Movimiento interno directo entre localidades de la misma sucursal. */
     case MOVIMIENTO_INTERNO = 'movimiento_interno';
+    /** Ajuste por diferencia de un conteo físico aprobado. */
+    case CONTEO = 'conteo';
 
     public function etiqueta(): string
     {
@@ -34,6 +36,7 @@ enum OrigenMovimiento: string
             self::REQUISICION_DESPACHO => 'Requisición (despacho)',
             self::REQUISICION_RECEPCION => 'Requisición (recepción)',
             self::MOVIMIENTO_INTERNO => 'Movimiento interno',
+            self::CONTEO => 'Conteo físico',
         };
     }
 }

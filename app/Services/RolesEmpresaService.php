@@ -68,6 +68,8 @@ class RolesEmpresaService
                 'requisiciones.ver',
                 'requisiciones.crear',
                 'requisiciones.recibir',
+                'conteos.ver',
+                'conteos.contar',
                 'cotizaciones.ver',
                 'cotizaciones.crear',
                 'cotizaciones.editar',
@@ -114,6 +116,8 @@ class RolesEmpresaService
                 'requisiciones.crear',
                 'requisiciones.despachar',
                 'requisiciones.recibir',
+                'conteos.ver',
+                'conteos.contar',
             ]);
 
         });

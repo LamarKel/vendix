@@ -134,6 +134,23 @@ class AlertaAntirroboService
             ];
         }
 
+        $conteos = \App\Models\Conteo::query()
+            ->where('empresa_id', $empresa->id)
+            ->where('estado', \App\Enums\EstadoConteo::APROBADO->value)
+            ->whereBetween('aprobado_en', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('valor_diferencia', '<', 0)
+            ->with('localidad.sucursal')
+            ->get();
+
+        if ($conteos->isNotEmpty()) {
+            $senales[] = [
+                'color' => 'rojo',
+                'titulo' => 'Faltantes en conteos físicos',
+                'detalle' => $conteos->take(5)->map(fn ($c) => "{$c->etiquetaNumero()} {$c->localidad->nombreCompleto()}: RD$ "
+                    .number_format(abs((float) $c->valor_diferencia), 2))->implode(' · '),
+            ];
+        }
+
         return $senales;
     }
 

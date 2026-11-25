@@ -236,6 +236,14 @@ localidad con su existencia antes/después.
   Movimiento interno = mismo documento en un paso, dentro de una sucursal (`MI-`).
 - Visibilidad (`App\Support\ExistenciaVisible`): de su sucursal, por localidad; de otras, solo
   el total. `sucursales.administrar` ve y opera todo.
+- Recepción: solo SUMA existencia por compra/recepción de OC (o el reverso de una devolución a
+  proveedor). Requisiciones, movimientos internos, ajustes y conteos no pueden sumarle.
+- Conteos físicos (`ConteoService`): a ciegas (la UI no muestra el sistema mientras se cuenta);
+  la existencia se fija por línea al contarla y el ajuste se aplica sobre la actual (se cuenta con
+  la tienda abierta). Aprobar por encima de `conteo_umbral_aprobacion_admin` exige
+  `sucursales.administrar`. Un conteo abierto por localidad.
+- Alertas diarias (`inventario:alertas`, 7:30): mercancía en recepción sin moverse N días y
+  resumen antirrobo de ayer (`AlertaAntirroboService`, umbrales por empresa).
 
 Mermas (`App\Services\MermaService`, Inventario → Mermas): no tienen tablas propias. Cada merma es
 un movimiento SALIDA con origen `merma`, su `motivo` (`App\Enums\MotivoMerma`) y su costo. Anular

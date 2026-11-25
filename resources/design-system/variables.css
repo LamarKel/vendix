@@ -1,23 +1,24 @@
 :root{
 
+    /*======== IDENTIDAD VENDIX (primario = verde Vendix #0C8A63) ======== */
     /*======== IDENTIDAD STITCH — paleta (fuente única de verdad) ========
        Para recolorear todo el panel + POS, cambia el valor BASE de un color aquí (p.ej.
        --primary) y corre `sail npm run build`. Cada color trae además su escala 50-950: la usan
        AdminPanelProvider (slots de Filament) y cualquier estado que necesite una variante más
        clara/oscura. Ver docs/estilos.md para el mapa completo de dónde se consume cada token. */
 
-    --primary:#5D87FF;
-    --primary-50:#F3F5FC;
-    --primary-100:#E3E8F7;
-    --primary-200:#C1CEF6;
-    --primary-300:#8EA9F6;
-    --primary-400:#5D87FF;
-    --primary-500:#1753FF;
-    --primary-600:#003BE6;
-    --primary-700:#0030B8;
-    --primary-800:#062889;
-    --primary-900:#081E5E;
-    --primary-950:#051239;
+    --primary:#0C8A63;
+    --primary-50:#ECFDF6;
+    --primary-100:#D1FAE8;
+    --primary-200:#A6F2D3;
+    --primary-300:#6DE3B8;
+    --primary-400:#2FC796;
+    --primary-500:#12A97C;
+    --primary-600:#0C8A63;
+    --primary-700:#0B6E51;
+    --primary-800:#0C5742;
+    --primary-900:#0B4737;
+    --primary-950:#04281F;
 
     --secondary:#49BEFF;
     --secondary-50:#F3F9FC;

@@ -127,7 +127,7 @@
    Filament deja el sidebar transparente en escritorio (`lg:bg-transparent`), así que hoy hereda
    el fondo de `.fi-body` sin querer. Se fuerza el navy del diseño aprobado (--fondo-sidebar) y se
    recolorea texto/íconos/activo a mano: Filament pinta el ítem activo con su color 'primary'
-   (azul #5D87FF, pensado para fondo claro), que no combina con navy: por eso el color activo sale
+   (pensado para fondo claro), que no combina con navy: por eso el color activo sale
    de --sidebar-item-activo-texto/fondo en lugar de dejárselo a Filament. */
 
 .fi-sidebar,

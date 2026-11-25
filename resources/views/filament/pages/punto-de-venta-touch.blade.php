@@ -58,12 +58,14 @@
   x-on:item-agregado.window="feedback(); enfocar()"
   x-on:producto-escaneado.window="feedback(); enfocar()"
   x-on:venta-cobrada.window="cobrarAbierto = false; recibido = ''; enfocar()"
-  x-on:keydown.escape.window="cobrarAbierto = false"
+  x-on:keydown.escape.window="cobrarAbierto = false; enfocar()"
+  x-on:keydown.f12.window.prevent="if (! cobrarAbierto) { if (! $refs.btnCobrar?.disabled) cobrarAbierto = true } else { $refs.btnConfirmar?.click() }"
 >
   <style>
     .post {
-      --pt-bg: #0f172a; --pt-card: #1e293b; --pt-card-2: #273549; --pt-borde: #334155;
-      --pt-texto: #e2e8f0; --pt-muted: #94a3b8; --pt-primario: #5D87FF; --pt-exito: #13DEB9;
+      /* Marca Vendix: azul noche + verde (mismos tonos que --primary en variables.css). */
+      --pt-bg: #0B1B2B; --pt-card: #12263A; --pt-card-2: #1A3450; --pt-borde: #24425F;
+      --pt-texto: #E2E8F0; --pt-muted: #94A3B8; --pt-primario: #12A97C; --pt-exito: #2FC796;
       --pt-peligro: #EF4444; --pt-aviso: #F59E0B;
       position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column;
       height: 100dvh; background: var(--pt-bg); color: var(--pt-texto);
@@ -82,7 +84,7 @@
     .pt-salir { display: inline-grid; place-items: center; min-width: 48px; min-height: 48px; border-radius: 10px; }
     .pt-salir:active { filter: brightness(1.25); }
     .pt-primario { background: var(--pt-primario) !important; color: #fff !important; }
-    .pt-exito { background: var(--pt-exito) !important; color: #052e24 !important; }
+    .pt-exito { background: var(--pt-exito) !important; color: #04281F !important; }
     .pt-peligro { background: var(--pt-peligro) !important; color: #fff !important; }
     .pt-activo { outline: 3px solid var(--pt-primario); outline-offset: -3px; }
     .pt-muted { color: var(--pt-muted); }
@@ -253,9 +255,6 @@
                   </span>
                   <span class="pt-det pt-muted">
                     RD$ {{ number_format((float) $linea['precio_unitario'], 2) }}
-                    @if ((float) $linea['descuento'] > 0)
-                      · desc. -{{ number_format((float) $linea['descuento'], 2) }}
-                    @endif
                   </span>
                   @if ($this->lineaConStockInsuficiente($linea))
                     <span class="pt-alerta" style="display:block">Stock insuficiente (disp. {{ number_format((float) $this->stockDeLinea($linea), 2) }})</span>
@@ -300,14 +299,14 @@
             <div><dt class="pt-muted">ITBIS</dt><dd class="pt-num">{{ number_format((float) $totales['total_itbis'], 2) }}</dd></div>
           </dl>
           <div class="pt-total">
-            <span>TOTAL</span>
+            <span>TOTAL <span class="pt-muted" style="font-size:.85rem;font-weight:600">{{ count($carrito) }} {{ count($carrito) === 1 ? 'línea' : 'líneas' }}</span></span>
             <span class="pt-num">RD$ {{ number_format((float) $totales['total'], 2) }}</span>
           </div>
           @if ($this->hayLineasConStockInsuficiente())
             <p class="pt-alerta" style="margin-bottom:.5rem">Hay líneas con stock insuficiente; corrígelas para poder cobrar.</p>
           @endif
           <div class="pt-acciones">
-            <button type="button" class="pt-exito" x-on:click="cobrarAbierto = true" @disabled(empty($carrito))>COBRAR</button>
+            <button type="button" class="pt-exito" x-ref="btnCobrar" x-on:click="cobrarAbierto = true" @disabled(empty($carrito) || $this->hayLineasConStockInsuficiente())>COBRAR</button>
             <button type="button" class="pt-peligro" wire:click="cancelarVenta" wire:confirm="¿Cancelar la venta en curso?" @disabled(empty($carrito))>CANCELAR</button>
           </div>
         </div>
@@ -409,11 +408,9 @@
         <div class="pt-teclado-ctn">
           <div>
             <div class="pt-display-buffer" x-text="buffer || '0'"></div>
-            <div class="pt-modos">
-              <button type="button" x-bind:class="modo === 'cantidad' && 'pt-primario'" x-on:click="modo = 'cantidad'">Cantidad</button>
-            </div>
-            <p class="pt-muted" style="font-size:.8rem;line-height:1.3">
-              Teclea y toca un producto para agregar esa cantidad (o el peso), o selecciona una línea y pulsa ⏎.
+            <p class="pt-muted" style="font-size:.85rem;line-height:1.35;margin-top:.5rem">
+              <strong style="color:var(--pt-texto)">Cantidad:</strong> teclea el número y toca el producto
+              (o el peso, si es pesado). Para corregir una línea: selecciónala, teclea y pulsa ⏎.
             </p>
           </div>
           <div class="pt-teclado">
@@ -542,7 +539,7 @@
               <button type="button" x-on:click="$refs.efectivo.value = ''; $wire.set('montoEfectivo', '')" style="grid-column: span 2">Limpiar</button>
             </div>
             @if (bccomp($this->vueltoCalculado(), '0.00', 2) > 0)
-              <p style="margin-top:.6rem;font-size:1.3rem;font-weight:700;color:var(--success-500)">
+              <p style="margin-top:.6rem;font-size:1.3rem;font-weight:700;color:var(--pt-exito)">
                 Vuelto: RD$ {{ number_format((float) $this->vueltoCalculado(), 2, '.', ',') }}
               </p>
             @endif
@@ -558,7 +555,7 @@
             <input type="number" inputmode="decimal" min="0" max="99999999.99" step="0.01"
               wire:model.blur="montoTarjeta" placeholder="0.00" />
             @if (bccomp($this->vueltoCalculado(), '0.00', 2) > 0)
-              <p style="margin-top:.6rem;font-size:1.3rem;font-weight:700;color:var(--success-500)">
+              <p style="margin-top:.6rem;font-size:1.3rem;font-weight:700;color:var(--pt-exito)">
                 Vuelto: RD$ {{ number_format((float) $this->vueltoCalculado(), 2, '.', ',') }}
               </p>
             @endif
@@ -570,10 +567,10 @@
           @php $saldoDisp = $this->saldoFavorCliente(); @endphp
           @if (bccomp($saldoDisp, '0.00', 2) > 0)
             <div class="pt-seccion" style="background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);border-radius:8px;padding:.75rem;margin-top:.75rem">
-              <p style="margin:0 0 .4rem;font-weight:600;color:var(--success-600)">Saldo a favor: RD$ {{ number_format((float) $saldoDisp, 2) }}</p>
+              <p style="margin:0 0 .4rem;font-weight:600;color:var(--pt-exito)">Saldo a favor: RD$ {{ number_format((float) $saldoDisp, 2) }}</p>
               <label style="font-size:.85rem">Usar de saldo:</label>
               <input type="number" inputmode="decimal" min="0" max="{{ $saldoDisp }}" step="0.01"
-                wire:model.blur="usarSaldoFavor" placeholder="0.00" style="width:100%;padding:.5rem;border-radius:6px;border:1px solid #d1d5db" />
+                wire:model.blur="usarSaldoFavor" placeholder="0.00" />
             </div>
           @endif
           @if (! $ventaACredito && in_array($formaPago, [\App\Enums\FormaPago::EFECTIVO->value, \App\Enums\FormaPago::MIXTO->value]) && bccomp($this->vueltoCalculado(), '0.00', 2) > 0)
@@ -584,7 +581,7 @@
           @endif
         @endif
 
-        <button type="button" class="pt-exito" style="width:100%;min-height:72px;font-size:1.4rem;margin-top:1.25rem"
+        <button type="button" class="pt-exito" x-ref="btnConfirmar" style="width:100%;min-height:72px;font-size:1.4rem;margin-top:1.25rem"
           wire:click="cobrar" wire:loading.attr="disabled" wire:target="cobrar" @disabled(! $this->puedeCobrar())>
           <span wire:loading.remove wire:target="cobrar">{{ $ventaACredito ? 'CONFIRMAR FIADO' : 'CONFIRMAR COBRO' }}</span>
           <span wire:loading wire:target="cobrar">Procesando…</span>

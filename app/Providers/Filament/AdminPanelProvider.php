@@ -70,7 +70,11 @@ class AdminPanelProvider extends PanelProvider
                 NavigationGroup::make('Configuración'),
             ])
             ->colors([
-                'primary' => Color::hex('#5D87FF'), // --primary
+                'primary' => [ // --primary: verde Vendix (escala explícita = variables.css; 600 es el de los botones)
+                    50 => '#ECFDF6', 100 => '#D1FAE8', 200 => '#A6F2D3', 300 => '#6DE3B8',
+                    400 => '#2FC796', 500 => '#12A97C', 600 => '#0C8A63', 700 => '#0B6E51',
+                    800 => '#0C5742', 900 => '#0B4737', 950 => '#04281F',
+                ],
                 'info' => Color::hex('#49BEFF'), // --secondary (rol "informativo" de Filament)
                 'success' => Color::hex('#13DEB9'), // --tertiary / --success
                 'warning' => Color::hex('#F59E0B'), // --warning

@@ -1,0 +1,36 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Http\Controllers;
+
+use App\Enums\AnchoPapel;
+use App\Models\Venta;
+use Illuminate\Contracts\View\View;
+use Illuminate\Http\Request;
+use SimpleSoftwareIO\QrCode\Facades\QrCode;
+
+/**
+ * Ticket térmico (80mm/58mm) para impresión NAVEGADOR: el navegador decide la impresora física,
+ * esta vista solo controla el formato y el contenido, y dispara window.print() al cargar.
+ */
+class VentaTicketController extends Controller
+{
+    public function __invoke(Request $request, Venta $venta): View
+    {
+        // Ruta fuera del panel de Filament: el scoping automático por tenant no aplica aquí (ver
+        // BelongsToTenant de Filament), así que la pertenencia a la empresa se verifica a mano.
+        abort_unless($request->user()->perteneceAEmpresa($venta->empresa_id), 403);
+
+        $venta->load('detalles.producto', 'cliente', 'user');
+
+        return view('ventas.ticket', [
+            'venta' => $venta,
+            'empresa' => $venta->empresa,
+            'anchoPapel' => AnchoPapel::tryFrom((string) $request->query('ancho')) ?? AnchoPapel::MM80,
+            'qrTimbre' => $venta->dgii_url !== null && $venta->estado_fiscal?->esAceptado()
+                ? base64_encode((string) QrCode::format('png')->size(120)->generate($venta->dgii_url))
+                : null,
+        ]);
+    }
+}

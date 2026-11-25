@@ -1,0 +1,511 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Enums\OrigenVenta;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoDocumentoCliente;
+use App\Enums\TipoProducto;
+use App\Filament\Pages\PuntoDeVenta;
+use App\Models\ArqueoCaja;
+use App\Models\Cliente;
+use App\Models\Descuento;
+use App\Models\Empresa;
+use App\Models\ListaPrecio;
+use App\Models\Producto;
+use App\Models\Role;
+use App\Models\SecuenciaNcf;
+use App\Models\User;
+use App\Models\Venta;
+use App\Services\ArqueoCajaService;
+use App\Services\Dgii\DgiiGatewayInterface;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
+use Tests\Support\GatewayStub;
+use Tests\TestCase;
+
+class PuntoDeVentaTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function vendedor(): User
+    {
+        Permission::firstOrCreate(['name' => 'pos.acceder', 'guard_name' => 'web']);
+        Permission::firstOrCreate(['name' => 'facturacion.acceder', 'guard_name' => 'web']);
+        $rol = Role::firstOrCreate(['empresa_id' => $this->empresaDefault->id, 'name' => 'Vendedor', 'guard_name' => 'web']);
+        Permission::firstOrCreate(['name' => 'ventas.aplicar_descuento', 'guard_name' => 'web']);
+        $rol->syncPermissions(['pos.acceder', 'facturacion.acceder', 'ventas.aplicar_descuento']);
+
+        $usuario = User::factory()->create();
+        $usuario->assignRole('Vendedor');
+
+        return $usuario;
+    }
+
+    private function producto(array $overrides = []): Producto
+    {
+        return Producto::create(array_merge([
+            'codigo' => 'POS-001',
+            'nombre' => 'Producto POS',
+            'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 50,
+            'precio' => 100,
+            'tasa_itbis' => TasaItbis::DIECIOCHO,
+            'controla_stock' => true,
+            'stock' => 5,
+            'stock_minimo' => 1,
+            'activo' => true,
+        ], $overrides));
+    }
+
+    /** Por defecto la venta es al portador: sin cliente, y sin crear un "Consumidor Final" genérico. */
+    public function test_arranca_al_portador_sin_cliente(): void
+    {
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->assertSet('totales.total', '0.00')
+            ->assertSet('clienteId', null)
+            ->assertSee('Al portador');
+
+        $this->assertDatabaseMissing('clientes', ['nombre' => 'Consumidor Final']);
+    }
+
+    public function test_agregar_producto_lo_suma_al_carrito_y_recalcula_totales(): void
+    {
+        $producto = $this->producto();
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->assertSet('carrito.0.producto_id', $producto->id)
+            ->assertSet('totales.subtotal', '100.00')
+            ->assertSet('totales.itbis_18', '18.00')
+            ->assertSet('totales.total', '118.00');
+    }
+
+    public function test_agregar_el_mismo_producto_dos_veces_incrementa_la_cantidad(): void
+    {
+        $producto = $this->producto();
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->call('agregarProducto', $producto->id)
+            ->assertSet('carrito.0.cantidad', 2)
+            ->assertSet('totales.total', '236.00');
+    }
+
+    public function test_quitar_linea_recalcula_los_totales_en_cero(): void
+    {
+        $producto = $this->producto();
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->call('quitarLinea', 0)
+            ->assertSet('carrito', [])
+            ->assertSet('totales.total', '0.00');
+    }
+
+    public function test_cantidad_mayor_al_stock_deshabilita_cobrar(): void
+    {
+        $producto = $this->producto(['stock' => 1]);
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('carrito.0.cantidad', 5);
+
+        $this->assertTrue($componente->instance()->hayLineasConStockInsuficiente());
+        $this->assertFalse($componente->instance()->puedeCobrar());
+    }
+
+    public function test_tipo_31_sin_rnc_del_cliente_deshabilita_cobrar(): void
+    {
+        $producto = $this->producto();
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CREDITO_FISCAL->value);
+
+        $this->assertTrue($componente->instance()->faltaRncComprador());
+        $this->assertFalse($componente->instance()->puedeCobrar());
+    }
+
+    public function test_tipo_31_con_rnc_del_cliente_permite_cobrar(): void
+    {
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CREDITO_FISCAL,
+            'prefijo' => 'E31',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 100,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $producto = $this->producto();
+        $cliente = Cliente::create([
+            'nombre' => 'Comercial Con RNC SRL',
+            'documento' => '130123456',
+            'tipo_documento' => TipoDocumentoCliente::RNC,
+            'activo' => true,
+        ]);
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('agregarProducto', $producto->id)
+            ->call('seleccionarCliente', $cliente->id)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CREDITO_FISCAL->value);
+
+        $this->assertFalse($componente->instance()->faltaRncComprador());
+        $this->assertTrue($componente->instance()->puedeCobrar());
+    }
+
+    public function test_tipo_32_por_debajo_del_umbral_permite_consumidor_final(): void
+    {
+        $producto = $this->producto();
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('agregarProducto', $producto->id)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO->value);
+
+        $this->assertFalse($componente->instance()->requiereRncComprador());
+        $this->assertFalse($componente->instance()->faltaRncComprador());
+        $this->assertTrue($componente->instance()->puedeCobrar());
+    }
+
+    public function test_tipo_32_al_cruzar_250k_en_vivo_exige_cliente_al_portador(): void
+    {
+        $producto = $this->producto(['codigo' => 'POS-250K', 'precio' => 300000]);
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO->value)
+            ->call('agregarProducto', $producto->id);
+
+        $this->assertTrue($componente->instance()->faltaCliente());
+        $this->assertFalse($componente->instance()->puedeCobrar());
+        $this->assertStringContainsString(
+            'requiere seleccionar un cliente con RNC/Cédula',
+            $componente->instance()->mensajeFaltaRncComprador(),
+        );
+    }
+
+    public function test_tipo_32_al_cruzar_250k_en_vivo_exige_rnc_con_cliente_sin_documento(): void
+    {
+        $producto = $this->producto(['codigo' => 'POS-250K', 'precio' => 300000]);
+        $cliente = Cliente::create(['nombre' => 'Cliente sin documento', 'activo' => true]);
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO->value)
+            ->call('seleccionarCliente', $cliente->id)
+            ->call('agregarProducto', $producto->id);
+
+        $this->assertTrue($componente->instance()->requiereRncComprador());
+        $this->assertTrue($componente->instance()->faltaRncComprador());
+        $this->assertFalse($componente->instance()->puedeCobrar());
+        $this->assertStringContainsString(
+            'RD$250,000',
+            $componente->instance()->mensajeFaltaRncComprador(),
+        );
+    }
+
+    public function test_tipo_32_igual_o_por_encima_de_250k_con_rnc_permite_cobrar(): void
+    {
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO,
+            'prefijo' => 'E32',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 100,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $producto = $this->producto(['codigo' => 'POS-250K-OK', 'precio' => 300000]);
+        $cliente = Cliente::create([
+            'nombre' => 'Comercial Con RNC SRL',
+            'documento' => '130123456',
+            'tipo_documento' => TipoDocumentoCliente::RNC,
+            'activo' => true,
+        ]);
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO->value)
+            ->call('agregarProducto', $producto->id)
+            ->call('seleccionarCliente', $cliente->id);
+
+        $this->assertFalse($componente->instance()->faltaRncComprador());
+        $this->assertTrue($componente->instance()->puedeCobrar());
+    }
+
+    public function test_buscar_cliente_en_dgii_crea_y_selecciona_el_cliente(): void
+    {
+        $this->app->bind(DgiiGatewayInterface::class, fn () => new class extends GatewayStub
+        {
+            public function buscarContribuyente(string $valor): ?array
+            {
+                return ['rnc' => $valor, 'nombre' => 'Comercial Desde DGII SRL'];
+            }
+        });
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->set('busquedaCliente', '130123456')
+            ->call('buscarClienteEnDgii');
+
+        $cliente = Cliente::where('documento', '130123456')->first();
+
+        $this->assertNotNull($cliente);
+        $this->assertSame('Comercial Desde DGII SRL', $cliente->nombre);
+        $componente->assertSet('clienteId', $cliente->id);
+        $componente->assertSet('busquedaCliente', '');
+    }
+
+    public function test_buscar_cliente_en_dgii_notifica_cuando_no_se_encuentra(): void
+    {
+        $this->app->bind(DgiiGatewayInterface::class, fn () => new class extends GatewayStub
+        {
+            public function buscarContribuyente(string $valor): ?array
+            {
+                return null;
+            }
+        });
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->set('busquedaCliente', '130123456')
+            ->call('buscarClienteEnDgii')
+            ->assertNotified();
+
+        $this->assertDatabaseMissing('clientes', ['documento' => '130123456']);
+    }
+
+    public function test_un_usuario_sin_permiso_no_puede_acceder(): void
+    {
+        $usuario = User::factory()->create();
+
+        $this->actingAs($usuario)
+            ->get(PuntoDeVenta::getUrl())
+            ->assertForbidden();
+    }
+
+    public function test_la_pagina_trae_el_wrapper_del_design_system_y_el_script_de_sidebar(): void
+    {
+        $usuario = $this->vendedor();
+        app(ArqueoCajaService::class)->abrir('500.00', $usuario->id, $this->empresaDefault);
+
+        $response = $this->actingAs($usuario)->get(PuntoDeVenta::getUrl());
+
+        $response->assertOk();
+        $response->assertSee('class="pos-screen"', false);
+        $response->assertSee('$store.sidebar.close()', false);
+        $response->assertSee('class="pos-grid"', false);
+        $response->assertSee('class="pos-main"', false);
+        $response->assertSee('class="pos-side"', false);
+        $response->assertSee('<thead>', false);
+        $response->assertSee('btn-cobrar', false);
+    }
+
+    public function test_no_puede_cobrar_sin_caja_abierta(): void
+    {
+        $producto = $this->producto();
+
+        $componente = Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id);
+
+        $this->assertNull($componente->instance()->arqueoAbierto());
+        $this->assertFalse($componente->instance()->puedeCobrar());
+
+        $componente->call('cobrar');
+
+        $this->assertDatabaseCount('ventas', 0);
+    }
+
+    public function test_abrir_caja_bloquea_abrir_una_segunda(): void
+    {
+        $usuario = $this->vendedor();
+
+        Livewire::actingAs($usuario)
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('abrirCaja', '300.00')
+            ->assertNotified();
+
+        $this->assertSame(1, ArqueoCaja::where('user_id', $usuario->id)->count());
+    }
+
+    public function test_cobrar_persiste_la_forma_de_pago_elegida(): void
+    {
+        $this->habilitarSecuenciaNcfDeConsumo();
+        $producto = $this->producto();
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('agregarProducto', $producto->id)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO->value)
+            ->set('formaPago', 'tarjeta')
+            ->call('cobrar');
+
+        $this->assertSame('tarjeta', Venta::first()->forma_pago->value);
+        $this->assertSame(OrigenVenta::POS, Venta::first()->origen);
+    }
+
+    public function test_seleccionar_un_descuento_configurado_aplica_su_porcentaje_al_subtotal(): void
+    {
+        $producto = $this->producto();
+        $descuento = Descuento::create([
+            'empresa_id' => $this->empresaDefault->id,
+            'nombre' => 'Empleado',
+            'porcentaje' => 10,
+            'activo' => true,
+        ]);
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $descuento->id)
+            ->assertSet('totales.descuento', '10.00')
+            // El ITBIS va sobre la base ya descontada: 18% de 90 = 16.20 (no de 100).
+            ->assertSet('totales.total_itbis', '16.20')
+            ->assertSet('totales.total', '106.20');
+    }
+
+    public function test_al_elegir_un_cliente_con_lista_de_precio_el_carrito_toma_sus_precios(): void
+    {
+        $producto = $this->producto();
+        $lista = ListaPrecio::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Mayorista', 'activa' => true]);
+        $lista->productos()->attach($producto->id, ['precio' => 80]);
+        $mayorista = Cliente::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Colmado Mayorista', 'activo' => true, 'lista_precio_id' => $lista->id]);
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->assertSet('carrito.0.precio_unitario', '100.00')
+            ->call('seleccionarCliente', $mayorista->id)
+            ->assertSet('carrito.0.precio_unitario', '80.00')
+            // 80 + 18 % de ITBIS
+            ->assertSet('totales.total', '94.40')
+            ->call('quitarCliente')
+            ->assertSet('carrito.0.precio_unitario', '100.00')
+            ->assertSet('totales.total', '118.00');
+    }
+
+    public function test_una_lista_inactiva_o_de_otra_empresa_no_cambia_los_precios(): void
+    {
+        $producto = $this->producto();
+        $inactiva = ListaPrecio::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Vieja', 'activa' => false]);
+        $inactiva->productos()->attach($producto->id, ['precio' => 10]);
+        $otraEmpresa = Empresa::create(['razon_social' => 'Otra Empresa', 'rnc' => '131999998']);
+        $ajena = ListaPrecio::create(['empresa_id' => $otraEmpresa->id, 'nombre' => 'Ajena', 'activa' => true]);
+        $ajena->productos()->attach($producto->id, ['precio' => 5]);
+
+        $conInactiva = Cliente::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Cliente A', 'activo' => true, 'lista_precio_id' => $inactiva->id]);
+        $conAjena = Cliente::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Cliente B', 'activo' => true, 'lista_precio_id' => $ajena->id]);
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->call('seleccionarCliente', $conInactiva->id)
+            ->assertSet('carrito.0.precio_unitario', '100.00')
+            ->call('seleccionarCliente', $conAjena->id)
+            ->assertSet('carrito.0.precio_unitario', '100.00');
+    }
+
+    public function test_el_precio_escrito_desde_el_navegador_no_se_usa_al_cobrar(): void
+    {
+        $usuario = $this->vendedor();
+        app(ArqueoCajaService::class)->abrir('500.00', $usuario->id, $this->empresaDefault);
+        $producto = $this->producto();
+
+        Livewire::actingAs($usuario)
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('carrito.0.precio_unitario', '1.00')
+            ->assertSet('carrito.0.precio_unitario', '100.00')
+            ->assertSet('totales.total', '118.00');
+    }
+
+    public function test_un_descuento_de_otra_empresa_no_se_aplica(): void
+    {
+        $otraEmpresa = Empresa::create(['razon_social' => 'Otra Empresa', 'rnc' => '131999999']);
+        $descuentoAjeno = Descuento::create([
+            'empresa_id' => $otraEmpresa->id,
+            'nombre' => 'Ajeno',
+            'porcentaje' => 50,
+            'activo' => true,
+        ]);
+        $producto = $this->producto();
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $descuentoAjeno->id)
+            ->assertSet('totales.descuento', '0.00')
+            ->assertSet('totales.total', '118.00');
+    }
+
+    public function test_un_descuento_desactivado_no_se_aplica(): void
+    {
+        $producto = $this->producto();
+        $descuento = Descuento::create([
+            'empresa_id' => $this->empresaDefault->id,
+            'nombre' => 'Vencido',
+            'porcentaje' => 20,
+            'activo' => false,
+        ]);
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $descuento->id)
+            ->assertSet('totales.descuento', '0.00');
+    }
+
+    public function test_cobrar_resetea_el_descuento_seleccionado(): void
+    {
+        $this->habilitarSecuenciaNcfDeConsumo();
+        $producto = $this->producto();
+        $descuento = Descuento::create([
+            'empresa_id' => $this->empresaDefault->id,
+            'nombre' => 'Empleado',
+            'porcentaje' => 10,
+            'activo' => true,
+        ]);
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $descuento->id)
+            ->call('cobrar')
+            ->assertSet('descuentoId', '')
+            ->assertSet('descuentoGlobal', '0.00');
+    }
+
+    private function habilitarSecuenciaNcfDeConsumo(): void
+    {
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO,
+            'prefijo' => 'E32',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 100,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+    }
+}

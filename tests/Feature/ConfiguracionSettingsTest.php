@@ -1,0 +1,186 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Enums\AmbienteEcf;
+use App\Enums\DocumentoImpreso;
+use App\Filament\Pages\ManageEmpresa;
+use App\Filament\Pages\ManageFacturacion;
+use App\Models\User;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
+use Tests\TestCase;
+
+class ConfiguracionSettingsTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function usuarioAutorizado(): User
+    {
+        Permission::firstOrCreate(['name' => 'empresa.administrar', 'guard_name' => 'web']);
+        Permission::firstOrCreate(['name' => 'facturacion.administrar', 'guard_name' => 'web']);
+        $rol = Role::firstOrCreate(['name' => 'Administrador', 'guard_name' => 'web']);
+        $rol->syncPermissions(['empresa.administrar', 'facturacion.administrar']);
+
+        $usuario = User::factory()->create(['empresa_id' => $this->empresaDefault->id]);
+        $usuario->assignRole('Administrador');
+
+        return $usuario;
+    }
+
+    public function test_guarda_los_datos_de_la_empresa(): void
+    {
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageEmpresa::class)
+            ->fillForm([
+                'razon_social' => 'Comercial Prueba SRL',
+                'nombre_comercial' => 'Prueba',
+                'rnc' => '130123456',
+                'direccion' => 'Calle Falsa 123',
+                'telefono' => '809-555-0000',
+                'email' => 'contacto@prueba.test',
+            ])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $this->assertSame('Comercial Prueba SRL', $this->empresaDefault->fresh()->razon_social);
+        $this->assertSame('130123456', $this->empresaDefault->fresh()->rnc);
+    }
+
+    public function test_una_cedula_que_empieza_con_cero_se_guarda_completa(): void
+    {
+        // Persona física: su RNC es la cédula, que puede empezar con 00. Antes el campo era
+        // numérico y se guardaba como 112345678 (sin los ceros): RNC emisor incorrecto en el e-CF.
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageEmpresa::class)
+            ->fillForm(['razon_social' => 'Juan Pérez', 'nombre_comercial' => 'Colmado Juan', 'rnc' => '00112345678'])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $this->assertSame('00112345678', $this->empresaDefault->fresh()->rnc);
+    }
+
+    public function test_un_rnc_con_letras_o_guiones_se_rechaza(): void
+    {
+        foreach (['13012345A', '130-12345-6'] as $rnc) {
+            Livewire::actingAs($this->usuarioAutorizado())
+                ->test(ManageEmpresa::class)
+                ->fillForm(['razon_social' => 'Comercial Prueba SRL', 'nombre_comercial' => 'Prueba', 'rnc' => $rnc])
+                ->call('save')
+                ->assertHasFormErrors(['rnc']);
+        }
+    }
+
+    public function test_rechaza_un_rnc_con_formato_invalido(): void
+    {
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageEmpresa::class)
+            ->fillForm([
+                'razon_social' => 'Comercial Prueba SRL',
+                'nombre_comercial' => 'Prueba',
+                'rnc' => '123',
+            ])
+            ->call('save')
+            ->assertHasFormErrors(['rnc']);
+    }
+
+    public function test_guarda_la_api_key_del_pac_cifrada_y_no_en_texto_plano(): void
+    {
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageEmpresa::class)
+            ->fillForm([
+                'razon_social' => 'Comercial Prueba SRL',
+                'nombre_comercial' => 'Prueba',
+                'rnc' => '130123456',
+                'dgii_api_key' => 'clave-secreta-del-pac',
+                'dgii_ambiente' => AmbienteEcf::CERTECF->value,
+                'dgii_base_url' => 'https://pac.ejemplo.test/api',
+            ])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $config = $this->empresaDefault->config()->fresh();
+        $this->assertSame('clave-secreta-del-pac', $config->dgii_api_key);
+        $this->assertSame(AmbienteEcf::CERTECF, $config->dgii_ambiente);
+
+        $payload = DB::table('empresa_configuracion')
+            ->where('empresa_id', $this->empresaDefault->id)
+            ->value('dgii_api_key');
+
+        $this->assertStringNotContainsString('clave-secreta-del-pac', $payload);
+    }
+
+    public function test_guarda_la_configuracion_de_facturacion(): void
+    {
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageFacturacion::class)
+            ->fillForm([
+                'aplica_itbis' => true,
+                'precio_incluye_itbis' => true,
+                'tasa_itbis_defecto' => '16',
+                'tipo_comprobante_defecto' => '31',
+                'moneda' => 'USD',
+            ])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $config = $this->empresaDefault->config()->fresh();
+        $this->assertTrue($config->precio_incluye_itbis);
+        $this->assertSame('16', $config->tasa_itbis_defecto);
+        $this->assertSame('USD', $config->moneda);
+    }
+
+    /**
+     * El toggle de ventas sin comprobante se carga con su valor guardado: sin esto aparecía
+     * apagado y al guardar cualquier otro cambio de la página lo desactivaba sin querer.
+     */
+    public function test_conserva_el_permiso_de_ventas_sin_comprobante_al_guardar_otros_cambios(): void
+    {
+        $this->empresaDefault->config()->update(['permite_ventas_sin_comprobante' => true]);
+
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageFacturacion::class)
+            ->assertSchemaStateSet(['permite_ventas_sin_comprobante' => true], 'form')
+            ->fillForm(['moneda' => 'USD'])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $this->assertTrue($this->empresaDefault->config()->fresh()->permite_ventas_sin_comprobante);
+    }
+
+    public function test_un_usuario_sin_permiso_no_puede_acceder(): void
+    {
+        $usuario = User::factory()->create(['empresa_id' => $this->empresaDefault->id]);
+        $rol = Role::firstOrCreate(['name' => 'Vendedor', 'guard_name' => 'web']);
+        $usuario->assignRole($rol);
+
+        $this->actingAs($usuario)
+            ->get(ManageFacturacion::getUrl())
+            ->assertForbidden();
+    }
+
+    public function test_guarda_textos_de_documentos_y_conserva_los_de_modulos_apagados(): void
+    {
+        // Un texto previo de un documento cuyo módulo pudiera estar apagado no debe perderse.
+        $this->empresaDefault->config()->update(['textos_documentos' => [
+            'cotizacion' => ['pie' => 'Precios sujetos a cambio sin previo aviso.'],
+        ]]);
+
+        Livewire::actingAs($this->usuarioAutorizado())
+            ->test(ManageFacturacion::class)
+            ->assertFormSet(['textos_documentos.venta_ticket.pie' => '¡Gracias por su compra!'])
+            ->fillForm(['textos_documentos.venta_ticket.pie' => 'Válido por 30 días.'])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $config = $this->empresaDefault->fresh()->config();
+        $this->assertSame('Válido por 30 días.', $config->textoDocumento(DocumentoImpreso::VENTA_TICKET));
+        $this->assertSame(
+            'Precios sujetos a cambio sin previo aviso.',
+            $config->textoDocumento(DocumentoImpreso::COTIZACION),
+        );
+    }
+}

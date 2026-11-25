@@ -1,0 +1,103 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\EstadoCompra;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoPago;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
+
+class Compra extends Model
+{
+    use HasFactory;
+
+    protected $fillable = [
+
+        'empresa_id', 'proveedor_id', 'pedido_compra_id', 'orden_compra_id', 'user_id',
+        'tipo_comprobante', 'ncf', 'fecha',
+        'itbis_incluido', 'monto_total_factura', 'tipo_pago', 'fecha_vencimiento',
+        'subtotal', 'monto_gravado_18', 'monto_gravado_16', 'monto_gravado_0', 'monto_exento',
+        'itbis_18', 'itbis_16', 'itbis', 'total',
+        'estado', 'motivo_anulacion', 'anulada_en',
+        // Campos 606
+        'tipo_bienes_servicios_606', 'forma_pago_606', 'fecha_pago',
+        'retencion_itbis', 'retencion_isr', 'tipo_retencion_isr',
+    ];
+
+    protected $casts = [
+        'tipo_comprobante' => TipoComprobante::class,
+        'tipo_pago' => TipoPago::class,
+        'estado' => EstadoCompra::class,
+        'itbis_incluido' => 'boolean',
+        'fecha' => 'datetime',
+        'fecha_vencimiento' => 'date',
+        'anulada_en' => 'datetime',
+        'fecha_pago' => 'date',
+        'monto_total_factura' => 'decimal:2',
+        'retencion_itbis' => 'decimal:2',
+        'retencion_isr' => 'decimal:2',
+        'subtotal' => 'decimal:2',
+        'monto_gravado_18' => 'decimal:2',
+        'monto_gravado_16' => 'decimal:2',
+        'monto_gravado_0' => 'decimal:2',
+        'monto_exento' => 'decimal:2',
+        'itbis_18' => 'decimal:2',
+        'itbis_16' => 'decimal:2',
+        'itbis' => 'decimal:2',
+        'total' => 'decimal:2',
+    ];
+
+    public function empresa(): BelongsTo
+    {
+        return $this->belongsTo(Empresa::class);
+    }
+
+    public function proveedor(): BelongsTo
+    {
+        return $this->belongsTo(Proveedor::class);
+    }
+
+    public function user(): BelongsTo
+    {
+        return $this->belongsTo(User::class);
+    }
+
+    public function pedidoCompra(): BelongsTo
+    {
+        return $this->belongsTo(PedidoCompra::class);
+    }
+
+    public function ordenCompra(): BelongsTo
+    {
+        return $this->belongsTo(OrdenCompra::class);
+    }
+
+    public function detalles(): HasMany
+    {
+        return $this->hasMany(DetalleCompra::class);
+    }
+
+    public function devoluciones(): HasMany
+    {
+        return $this->hasMany(DevolucionCompra::class);
+    }
+
+    public function cuentaPorPagar(): HasOne
+    {
+        return $this->hasOne(CuentaPorPagar::class);
+    }
+
+    public function esACredito(): bool
+    {
+        return $this->tipo_pago === TipoPago::CREDITO;
+    }
+
+    public function estaAnulada(): bool
+    {
+        return $this->estado === EstadoCompra::ANULADA;
+    }
+}

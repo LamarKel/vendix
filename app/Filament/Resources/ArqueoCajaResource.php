@@ -1,0 +1,266 @@
+<?php
+
+namespace App\Filament\Resources;
+
+use App\Enums\EstadoArqueoCaja;
+use App\Enums\Modulo;
+use App\Filament\Concerns\RestringidoPorModulo;
+use App\Filament\Resources\ArqueoCajaResource\Pages;
+use App\Models\ArqueoCaja;
+use App\Services\ArqueoCajaService;
+use App\Support\MensajeError;
+use Filament\Actions\Action;
+use Filament\Actions\ViewAction;
+use Filament\Facades\Filament;
+use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
+use Filament\Infolists\Components\RepeatableEntry;
+use Filament\Infolists\Components\RepeatableEntry\TableColumn as InfolistTableColumn;
+use Filament\Infolists\Components\TextEntry;
+use Filament\Notifications\Notification;
+use Filament\Resources\Resource;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use RuntimeException;
+
+class ArqueoCajaResource extends Resource
+{
+    use RestringidoPorModulo;
+
+    protected static ?string $model = ArqueoCaja::class;
+
+    public static function modulo(): Modulo
+    {
+        return Modulo::VENTAS_ARQUEO_CAJA;
+    }
+
+    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-banknotes';
+
+    protected static ?string $navigationLabel = 'Arqueos de Caja';
+
+    protected static ?string $modelLabel = 'Arqueo de caja';
+
+    protected static ?string $pluralModelLabel = 'Arqueos de caja';
+
+    protected static ?string $slug = 'arqueos-caja';
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Operaciones';
+
+    protected static ?int $navigationSort = 7;
+
+    // No se crea a mano: un arqueo nace al abrir caja desde Caja/Facturación. El cierre sí se
+    // hace aquí (acción "Cerrar caja" en la tabla), no desde las pantallas de venta.
+    public static function canCreate(): bool
+    {
+        return false;
+    }
+
+    public static function infolist(Schema $schema): Schema
+    {
+        return $schema->components([
+            Section::make('Datos del arqueo')
+                ->columnSpanFull()
+                ->columns(3)
+                ->schema([
+                    TextEntry::make('user.name')->label('Cajero'),
+                    TextEntry::make('caja.nombre')->label('Caja')->placeholder('—'),
+                    TextEntry::make('estado')->label('Estado')->badge()
+                        ->formatStateUsing(fn (EstadoArqueoCaja $state) => $state->etiqueta())
+                        ->color(fn (EstadoArqueoCaja $state) => $state === EstadoArqueoCaja::CERRADO ? 'success' : 'warning'),
+                    TextEntry::make('abierto_en')->label('Abierto')->dateTime('d/m/Y H:i'),
+                    TextEntry::make('cerrado_en')->label('Cerrado')->dateTime('d/m/Y H:i')->placeholder('—'),
+                    TextEntry::make('fondo_inicial')->label('Fondo inicial')->money('DOP'),
+                    TextEntry::make('total_ventas_efectivo')->label('Ventas en efectivo')->money('DOP')->placeholder('—'),
+                    TextEntry::make('total_ventas_tarjeta')->label('Ventas con tarjeta')->money('DOP')->placeholder('—'),
+                    TextEntry::make('total_ventas_transferencia')->label('Ventas por transferencia')->money('DOP')->placeholder('—'),
+                    TextEntry::make('total_devoluciones_efectivo')->label('Devoluciones en efectivo')->money('DOP')
+                        ->visible(fn ($record) => (float) $record->total_devoluciones_efectivo > 0),
+                    TextEntry::make('efectivo_esperado')->label('Efectivo esperado')->money('DOP')->placeholder('—'),
+                    TextEntry::make('efectivo_contado')->label('Efectivo contado')->money('DOP')->placeholder('—'),
+                    TextEntry::make('diferencia')->label('Diferencia')->money('DOP')->placeholder('—')
+                        ->color(fn (?string $state) => $state === null ? null : (bccomp($state, '0', 2) < 0 ? 'danger' : 'success')),
+                    TextEntry::make('notas')->label('Notas')->placeholder('—')->columnSpanFull(),
+                ]),
+
+            RepeatableEntry::make('ventas')
+                ->label('Ventas del turno')
+                ->table([
+                    InfolistTableColumn::make('NCF'),
+                    InfolistTableColumn::make('Forma de pago'),
+                    InfolistTableColumn::make('Total'),
+                    InfolistTableColumn::make('Estado'),
+                ])
+                ->schema([
+                    TextEntry::make('ncf')->hiddenLabel()->placeholder('—'),
+                    TextEntry::make('forma_pago')->hiddenLabel()->formatStateUsing(fn ($state) => $state->etiqueta()),
+                    TextEntry::make('total')->hiddenLabel()->money('DOP'),
+                    TextEntry::make('estado')->hiddenLabel()->formatStateUsing(fn ($state) => $state->value),
+                ])
+                ->columnSpanFull(),
+        ]);
+    }
+
+    public static function table(Table $table): Table
+    {
+        return $table
+            ->columns([
+                TextColumn::make('user.name')
+                    ->label('Cajero')
+                    ->searchable()
+                    ->sortable(),
+
+                TextColumn::make('caja.nombre')
+                    ->label('Caja')
+                    ->placeholder('—')
+                    ->sortable(),
+
+                TextColumn::make('abierto_en')
+                    ->label('Abierto')
+                    ->dateTime('d/m/Y H:i')
+                    ->sortable(),
+
+                TextColumn::make('cerrado_en')
+                    ->label('Cerrado')
+                    ->dateTime('d/m/Y H:i')
+                    ->placeholder('—')
+                    ->sortable(),
+
+                TextColumn::make('fondo_inicial')
+                    ->label('Fondo inicial')
+                    ->money('DOP')
+                    ->alignEnd()
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('efectivo_esperado')
+                    ->label('Efectivo esperado')
+                    ->money('DOP')
+                    ->alignEnd()
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('efectivo_contado')
+                    ->label('Efectivo contado')
+                    ->money('DOP')
+                    ->alignEnd()
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('diferencia')
+                    ->label('Diferencia')
+                    ->money('DOP')
+                    ->alignEnd()
+                    ->placeholder('—')
+                    ->color(fn (?string $state) => $state === null ? null : (bccomp($state, '0', 2) < 0 ? 'danger' : 'success')),
+
+                TextColumn::make('estado')
+                    ->label('Estado')
+                    ->badge()
+                    ->formatStateUsing(fn (EstadoArqueoCaja $state) => $state->etiqueta())
+                    ->color(fn (EstadoArqueoCaja $state) => $state === EstadoArqueoCaja::CERRADO ? 'success' : 'warning'),
+            ])
+            ->filters([
+                SelectFilter::make('user_id')
+                    ->label('Cajero')
+                    // ->relationship() no hereda el scoping automático de Filament (solo aplica a
+                    // lo que arma el propio framework en la query del Resource, no a relaciones
+                    // resueltas aparte): sin esto, se ven cajeros de otras empresas en el filtro.
+                    ->relationship('user', 'name', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()->id))
+                    ->searchable()
+                    ->preload(),
+
+                SelectFilter::make('caja_id')
+                    ->label('Caja')
+                    // Mismo motivo que el filtro de cajero: ->relationship() no se scopea solo.
+                    ->relationship('caja', 'nombre', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()->id))
+                    ->searchable()
+                    ->preload(),
+
+                SelectFilter::make('estado')
+                    ->label('Estado')
+                    ->options([
+                        EstadoArqueoCaja::ABIERTO->value => 'Abierto',
+                        EstadoArqueoCaja::CERRADO->value => 'Cerrado',
+                    ]),
+
+                Filter::make('fecha')
+                    ->schema([
+                        DatePicker::make('desde')->label('Desde'),
+                        DatePicker::make('hasta')->label('Hasta'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query
+                            ->when($data['desde'] ?? null, fn (Builder $q, $desde) => $q->whereDate('abierto_en', '>=', $desde))
+                            ->when($data['hasta'] ?? null, fn (Builder $q, $hasta) => $q->whereDate('abierto_en', '<=', $hasta));
+                    }),
+            ])
+            ->recordActions([
+                ViewAction::make(),
+
+                Action::make('cerrarCaja')
+                    ->label('Cerrar caja')
+                    ->icon('heroicon-o-lock-closed')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    // Mismo criterio que exige ArqueoCajaService::cerrar(): quien abrió el turno
+                    // siempre puede cerrarlo; además, quien tiene 'arqueo.cerrar_ajeno'
+                    // (Administrador) puede cerrar la caja de cualquier cajero de su empresa.
+                    ->visible(fn (ArqueoCaja $record): bool => $record->estaAbierto()
+                        && ($record->user_id === auth()->id() || (auth()->user()?->can('arqueo.cerrar_ajeno') ?? false)))
+                    ->schema([
+                        TextInput::make('efectivo_contado')
+                            ->label('Efectivo contado')
+                            ->numeric()
+                            ->prefix('RD$')
+                            ->minValue(0)
+                            ->required(),
+                        Textarea::make('notas')
+                            ->label('Notas (opcional)')
+                            ->rows(2),
+                    ])
+                    ->action(function (ArqueoCaja $record, array $data): void {
+                        try {
+                            app(ArqueoCajaService::class)->cerrar(
+                                $record,
+                                $data['efectivo_contado'],
+                                $data['notas'] ?? null,
+                                auth()->id(),
+                                auth()->user()?->can('arqueo.cerrar_ajeno') ?? false,
+                            );
+                        } catch (RuntimeException $e) {
+                            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                            return;
+                        }
+
+                        Notification::make()->title('Caja cerrada')->success()->send();
+                    }),
+
+                Action::make('descargarPdf')
+                    ->label('Descargar PDF')
+                    ->icon('heroicon-o-document-arrow-down')
+                    ->color('gray')
+                    ->visible(fn (ArqueoCaja $record) => $record->estaCerrado())
+                    ->url(fn (ArqueoCaja $record) => route('arqueos-caja.pdf', $record), shouldOpenInNewTab: true),
+            ])
+            ->defaultSort('abierto_en', 'desc');
+    }
+
+    public static function getEloquentQuery(): Builder
+    {
+        return parent::getEloquentQuery()->with(['user', 'caja']);
+    }
+
+    public static function getPages(): array
+    {
+        return [
+            'index' => Pages\ListArqueosCaja::route('/'),
+            'view' => Pages\ViewArqueoCaja::route('/{record}'),
+        ];
+    }
+}

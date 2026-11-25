@@ -1,0 +1,683 @@
+<?php
+
+namespace App\Filament\Resources;
+
+use App\Enums\AmbienteEcf;
+use App\Enums\AnchoPapel;
+use App\Enums\DestinoDevolucion;
+use App\Enums\EstadoFiscal;
+use App\Enums\EstadoVenta;
+use App\Enums\EventoEcf;
+use App\Enums\FormaReembolso;
+use App\Enums\Modulo;
+use App\Enums\ModuloImpresion;
+use App\Enums\OrigenVenta;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoPago;
+use App\Exceptions\ArqueoCajaCerradoException;
+use App\Exceptions\CuentaConPagosRegistradosException;
+use App\Exceptions\SecuenciaNcfAgotadaException;
+use App\Exceptions\VentaInvalidaException;
+use App\Exceptions\VentaYaAnuladaException;
+use App\Filament\Concerns\RestringidoPorModulo;
+use App\Filament\Resources\VentaResource\Pages;
+use App\Jobs\EnviarEcfJob;
+use App\Models\Venta;
+use App\Services\ArqueoCajaService;
+use App\Services\Dgii\EnvioEcfService;
+use App\Services\Impresion\ImpresionService;
+use App\Services\ReporteService;
+use App\Services\VentaService;
+use App\Support\MensajeError;
+use Filament\Actions\Action;
+use Filament\Actions\ViewAction;
+use Filament\Facades\Filament;
+use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
+use Filament\Infolists\Components\RepeatableEntry;
+use Filament\Infolists\Components\RepeatableEntry\TableColumn;
+use Filament\Infolists\Components\TextEntry;
+use Filament\Infolists\Components\ViewEntry;
+use Filament\Notifications\Notification;
+use Filament\Resources\Resource;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Filters\TernaryFilter;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+
+class VentaResource extends Resource
+{
+    /** Valor del filtro de tipo de comprobante para ventas sin comprobante (tipo_comprobante null). */
+    private const FILTRO_SIN_COMPROBANTE = 'sin_comprobante';
+
+    use RestringidoPorModulo;
+
+    protected static ?string $model = Venta::class;
+
+    public static function modulo(): Modulo
+    {
+        return Modulo::VENTAS_LISTADO;
+    }
+
+    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-receipt-percent';
+
+    protected static ?string $navigationLabel = 'Ventas';
+
+    protected static ?string $modelLabel = 'Venta';
+
+    protected static ?string $pluralModelLabel = 'Ventas';
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Operaciones';
+
+    protected static ?int $navigationSort = 3;
+
+    // Las ventas se crean únicamente desde el Punto de Venta (VentaService::registrar).
+    public static function canCreate(): bool
+    {
+        return false;
+    }
+
+    public static function infolist(Schema $schema): Schema
+    {
+        return $schema->components([
+            Section::make('Comprobante')
+                ->columns(3)
+                ->schema([
+                    TextEntry::make('fecha')->label('Fecha')->dateTime('d/m/Y H:i'),
+                    TextEntry::make('ncf')->label('NCF')->placeholder('—'),
+                    TextEntry::make('tipo_comprobante')
+                        ->label('Tipo')
+                        ->placeholder(Venta::ETIQUETA_SIN_COMPROBANTE)
+                        ->badge()
+                        ->formatStateUsing(fn (TipoComprobante $state) => "{$state->value} — {$state->etiqueta()}")
+                        ->color(fn (TipoComprobante $state) => $state->esElectronico() ? 'info' : 'gray'),
+                    TextEntry::make('cliente.nombre')->label('Cliente')->placeholder(Venta::ETIQUETA_AL_PORTADOR),
+                    TextEntry::make('estado')
+                        ->label('Estado')
+                        ->badge()
+                        ->color(fn (EstadoVenta $state) => $state === EstadoVenta::ANULADA ? 'danger' : 'success'),
+                    TextEntry::make('estado_fiscal')
+                        ->label('Estado fiscal')
+                        ->badge()
+                        ->formatStateUsing(fn (EstadoFiscal $state) => self::etiquetaEstadoFiscal($state))
+                        ->color(fn (EstadoFiscal $state) => self::colorEstadoFiscal($state)),
+                    TextEntry::make('motivo_anulacion')
+                        ->label('Motivo de anulación')
+                        ->visible(fn (Venta $record) => $record->estaAnulada())
+                        ->columnSpan(3),
+                    TextEntry::make('notasCredito.ncf')
+                        ->label('Anulada ante la DGII con la Nota de Crédito')
+                        ->visible(fn (Venta $record) => $record->notasCredito()->exists())
+                        ->columnSpan(2),
+                    TextEntry::make('ventaModificada.ncf')
+                        ->label('Nota de Crédito que anula la venta')
+                        ->visible(fn (Venta $record) => $record->esNotaCreditoDeAnulacion())
+                        ->columnSpan(2),
+                ]),
+
+            Section::make('Estado fiscal DGII')
+                ->columns(4)
+                ->visible(fn (Venta $record) => $record->esElectronica())
+                ->schema([
+                    TextEntry::make('estado_fiscal')
+                        ->label('Estado')
+                        ->badge()
+                        ->formatStateUsing(fn (EstadoFiscal $state) => self::etiquetaEstadoFiscal($state))
+                        ->color(fn (EstadoFiscal $state) => self::colorEstadoFiscal($state)),
+                    TextEntry::make('ecf_track_id')
+                        ->label('Track ID')
+                        ->placeholder('—'),
+                    TextEntry::make('codigo_seguridad')
+                        ->label('Código de seguridad')
+                        ->placeholder('—'),
+                    TextEntry::make('ambiente')
+                        ->label('Ambiente')
+                        ->placeholder('—')
+                        ->formatStateUsing(fn (?AmbienteEcf $state) => $state?->etiqueta()),
+
+                    TextEntry::make('descargar_xml')
+                        ->label('XML firmado')
+                        ->getStateUsing(fn () => 'Descargar XML')
+                        ->url(fn (Venta $record) => route('ventas.ecf.xml', $record))
+                        ->openUrlInNewTab()
+                        ->icon('heroicon-o-arrow-down-tray')
+                        ->visible(fn (Venta $record) => $record->pac_id !== null || $record->xml_url !== null)
+                        ->columnSpan(4),
+
+                    ViewEntry::make('dgii_url')
+                        ->label('Timbre / QR')
+                        ->view('filament.infolists.venta-qr-timbre')
+                        ->visible(fn (Venta $record) => $record->dgii_url !== null)
+                        ->columnSpan(4),
+
+                    RepeatableEntry::make('eventos')
+                        ->label('Historial DGII')
+                        ->getStateUsing(fn (Venta $record) => collect(data_get($record->ecf_respuesta, 'eventos', []))
+                            ->sortBy('timestamp')
+                            ->values()
+                            ->all())
+                        ->schema([
+                            TextEntry::make('timestamp')
+                                ->label('Fecha/hora')
+                                ->dateTime('d/m/Y H:i:s'),
+                            TextEntry::make('status')
+                                ->label('Evento')
+                                ->formatStateUsing(fn (?string $state) => $state !== null
+                                    ? (EventoEcf::tryFrom($state)?->etiqueta() ?? $state)
+                                    : null),
+                        ])
+                        ->columns(2)
+                        ->visible(fn (Venta $record) => filled(data_get($record->ecf_respuesta, 'eventos')))
+                        ->columnSpan(4),
+                ]),
+
+            Section::make('Líneas')
+                ->schema([
+                    RepeatableEntry::make('detalles')
+                        ->label('')
+                        ->table([
+                            TableColumn::make('Descripción'),
+                            TableColumn::make('Cantidad'),
+                            TableColumn::make('Precio'),
+                            TableColumn::make('ITBIS'),
+                            TableColumn::make('Subtotal'),
+                        ])
+                        ->schema([
+                            TextEntry::make('descripcion')->label(''),
+                            TextEntry::make('cantidad')->label(''),
+                            TextEntry::make('precio_unitario')->label('')->money('DOP'),
+                            TextEntry::make('itbis_monto')->label('')->money('DOP'),
+                            TextEntry::make('subtotal')->label('')->money('DOP'),
+                        ]),
+                ]),
+
+            Section::make('Totales')
+                ->columns(3)
+                ->schema([
+                    TextEntry::make('subtotal')->label('Subtotal')->money(fn (Venta $record) => $record->moneda),
+                    TextEntry::make('itbis_18')->label('ITBIS 18%')->money(fn (Venta $record) => $record->moneda),
+                    TextEntry::make('itbis_16')->label('ITBIS 16%')->money(fn (Venta $record) => $record->moneda),
+                    TextEntry::make('monto_gravado_0')->label('Exento/0%')->money(fn (Venta $record) => $record->moneda),
+                    TextEntry::make('descuento')->label('Descuento')->money(fn (Venta $record) => $record->moneda)
+                        ->suffix(fn (Venta $record) => $record->descuento_porcentaje !== null
+                            ? ' ('.number_format((float) $record->descuento_porcentaje, 2).'%'
+                                .($record->descuentoAplicado ? ' — '.$record->descuentoAplicado->nombre : '').')'
+                            : ''),
+                    TextEntry::make('total')->label('Total')->money(fn (Venta $record) => $record->moneda)->weight('bold'),
+                ]),
+        ]);
+    }
+
+    public static function getEloquentQuery(): Builder
+    {
+        // arqueoCaja: lo consulta la visibilidad de "Anular" en CADA fila; sin precargarlo era
+        // una consulta por venta listada (N+1).
+        return parent::getEloquentQuery()->with(['cliente', 'user', 'arqueoCaja']);
+    }
+
+    public static function table(Table $table): Table
+    {
+        return $table
+            ->columns([
+                TextColumn::make('fecha')
+                    ->label('Fecha')
+                    ->dateTime('d/m/Y H:i')
+                    ->sortable(),
+
+                TextColumn::make('ncf')
+                    ->label('e-NCF')
+                    ->searchable()
+                    ->placeholder('—'),
+
+                TextColumn::make('cliente.nombre')
+                    ->label('Cliente')
+                    ->placeholder(Venta::ETIQUETA_AL_PORTADOR)
+                    ->searchable()
+                    ->sortable(),
+
+                TextColumn::make('tipo_comprobante')
+                    ->label('Tipo')
+                    ->placeholder(Venta::ETIQUETA_SIN_COMPROBANTE)
+                    ->badge()
+                    ->formatStateUsing(fn (TipoComprobante $state) => "{$state->value} — {$state->etiqueta()}")
+                    ->color(fn (TipoComprobante $state) => $state->esElectronico() ? 'info' : 'gray')
+                    ->toggleable(isToggledHiddenByDefault: true)
+                    ->sortable(),
+
+                TextColumn::make('total')
+                    ->label('Total')
+                    ->money(fn (Venta $record) => $record->moneda)
+                    ->alignEnd()
+                    ->sortable(),
+
+                TextColumn::make('estado')
+                    ->label('Estado')
+                    ->badge()
+                    ->color(fn (EstadoVenta $state) => $state === EstadoVenta::ANULADA ? 'danger' : 'success'),
+
+                TextColumn::make('origen')
+                    ->label('Origen')
+                    ->formatStateUsing(fn (OrigenVenta $state) => $state->etiqueta())
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('estado_fiscal')
+                    ->label('Estado fiscal')
+                    ->badge()
+                    ->formatStateUsing(fn (EstadoFiscal $state) => self::etiquetaEstadoFiscal($state))
+                    ->color(fn (EstadoFiscal $state) => self::colorEstadoFiscal($state)),
+            ])
+            ->filters([
+                SelectFilter::make('estado')
+                    ->label('Estado')
+                    ->options([
+                        EstadoVenta::EMITIDA->value => 'Emitida',
+                        EstadoVenta::ANULADA->value => 'Anulada',
+                    ]),
+
+                SelectFilter::make('estado_fiscal')
+                    ->label('Estado fiscal')
+                    ->options(collect(EstadoFiscal::cases())->mapWithKeys(
+                        fn (EstadoFiscal $estado) => [$estado->value => self::etiquetaEstadoFiscal($estado)]
+                    )),
+
+                SelectFilter::make('tipo_comprobante')
+                    ->label('Tipo de comprobante')
+                    ->options([self::FILTRO_SIN_COMPROBANTE => Venta::ETIQUETA_SIN_COMPROBANTE] + collect(TipoComprobante::cases())->mapWithKeys(
+                        fn (TipoComprobante $tipo) => [$tipo->value => $tipo->etiqueta()]
+                    )->all())
+                    ->query(fn (Builder $query, array $data): Builder => match ($data['value'] ?? null) {
+                        null, '' => $query,
+                        self::FILTRO_SIN_COMPROBANTE => $query->whereNull('tipo_comprobante'),
+                        default => $query->where('tipo_comprobante', $data['value']),
+                    }),
+
+                SelectFilter::make('origen')
+                    ->label('Origen')
+                    ->options(collect(OrigenVenta::cases())->mapWithKeys(
+                        fn (OrigenVenta $origen) => [$origen->value => $origen->etiqueta()]
+                    )),
+
+                SelectFilter::make('ambiente')
+                    ->label('Ambiente DGII')
+                    ->options(collect(AmbienteEcf::cases())->mapWithKeys(
+                        fn (AmbienteEcf $ambiente) => [$ambiente->value => $ambiente->etiqueta()]
+                    )),
+
+                SelectFilter::make('cliente_id')
+                    ->label('Cliente')
+                    // Scope manual obligatorio — Filament NO aplica tenant scope dentro de
+                    // ->relationship(), ni siquiera dentro de su propio Resource.
+                    ->relationship('cliente', 'nombre', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()->id))
+                    ->searchable(),
+
+                TernaryFilter::make('al_portador')
+                    ->label(Venta::ETIQUETA_AL_PORTADOR)
+                    ->placeholder('Todas')
+                    ->trueLabel('Solo al portador')
+                    ->falseLabel('Solo con cliente')
+                    ->queries(
+                        true: fn (Builder $query) => $query->whereNull('cliente_id'),
+                        false: fn (Builder $query) => $query->whereNotNull('cliente_id'),
+                    ),
+
+                Filter::make('fecha')
+                    ->schema([
+                        DatePicker::make('desde')->label('Desde'),
+                        DatePicker::make('hasta')->label('Hasta'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query
+                            ->when($data['desde'] ?? null, fn (Builder $q, $desde) => $q->whereDate('fecha', '>=', $desde))
+                            ->when($data['hasta'] ?? null, fn (Builder $q, $hasta) => $q->whereDate('fecha', '<=', $hasta));
+                    }),
+            ])
+            ->recordActions([
+                ViewAction::make()->label('Ver'),
+
+                Action::make('imprimir')
+                    ->label('Imprimir')
+                    ->icon('heroicon-o-printer')
+                    ->color('gray')
+                    ->visible(fn (): bool => auth()->user()?->can('ventas.imprimir') ?? false)
+                    ->url(fn (Venta $record) => route('ventas.pdf', $record))
+                    ->openUrlInNewTab(),
+
+                self::reimprimirTicketAction(),
+
+                Action::make('anular')
+                    ->label('Anular')
+                    ->icon('heroicon-o-x-circle')
+                    ->color('danger')
+                    ->visible(fn (Venta $record) => $record->estado === EstadoVenta::EMITIDA
+                        && ! $record->esNotaCreditoDeAnulacion()
+                        && ! ($record->arqueoCaja?->estaCerrado() ?? false)
+                        && (auth()->user()?->can('ventas.anular') ?? false))
+                    ->requiresConfirmation()
+                    ->modalDescription(fn (Venta $record): string => match (true) {
+                        $record->esElectronica() && $record->estado_fiscal->estaEnTramite() => 'La DGII todavía no respondió sobre esta venta: espera su respuesta antes de anularla.',
+                        $record->esElectronica() && $record->estado_fiscal->esAceptado() => "La DGII ya aceptó el e-CF {$record->ncf}: se emitirá una Nota de Crédito electrónica (e-CF 34) que lo anula, y se repondrá el stock.",
+                        default => 'Se repondrá el stock y la venta quedará anulada. No se emite Nota de Crédito (el comprobante no fue aceptado por la DGII).',
+                    })
+                    ->schema(function (Venta $record): array {
+                        $campos = [
+                            Textarea::make('motivo')
+                                ->label('Motivo de la anulación')
+                                ->required()
+                                ->rows(3),
+                        ];
+
+                        // Comprobantes físicos (tipo B) requieren tipo de anulación para el 608
+                        if ($record->tipo_comprobante?->esFisico()) {
+                            $campos[] = Select::make('tipo_anulacion_608')
+                                ->label('Tipo de anulación (608)')
+                                ->options(
+                                    collect(ReporteService::TIPO_ANULACION_608)
+                                        ->mapWithKeys(fn (string $label, string $code) => [$code => "{$code} - {$label}"])
+                                        ->all()
+                                )
+                                ->required()
+                                ->helperText('Requerido para el reporte 608 de la DGII');
+                        }
+
+                        return $campos;
+                    })
+                    ->action(function (Venta $record, array $data): void {
+                        try {
+                            $venta = app(VentaService::class)->anular($record, $data['motivo'], auth()->id(), $data['tipo_anulacion_608'] ?? null);
+                        } catch (VentaYaAnuladaException|ArqueoCajaCerradoException|VentaInvalidaException|SecuenciaNcfAgotadaException|CuentaConPagosRegistradosException $e) {
+                            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                            return;
+                        }
+
+                        $notaCredito = $venta->notasCredito()->first();
+
+                        Notification::make()
+                            ->title('Venta anulada correctamente')
+                            ->body($notaCredito ? "Nota de Crédito {$notaCredito->ncf} emitida; se está enviando a la DGII." : null)
+                            ->success()
+                            ->send();
+                    }),
+
+                Action::make('notaDebito')
+                    ->label('Nota de Débito')
+                    ->icon('heroicon-o-plus-circle')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->modalHeading('Emitir Nota de Débito')
+                    ->modalDescription(fn (Venta $record): string => "Cargo adicional sobre la venta {$record->ncf}.")
+                    ->schema([
+                        Textarea::make('motivo')
+                            ->label('Motivo del ajuste')
+                            ->required()
+                            ->maxLength(255)
+                            ->rows(2),
+                        Repeater::make('detalles')
+                            ->label('Ítems del ajuste')
+                            ->schema([
+                                Select::make('producto_id')
+                                    ->label('Producto')
+                                    ->options(fn (Venta $record) => $record->detalles->mapWithKeys(fn ($d) => [
+                                        $d->producto_id => $d->descripcion,
+                                    ]))
+                                    ->required(),
+                                TextInput::make('cantidad')
+                                    ->numeric()
+                                    ->default(1)
+                                    ->minValue(1)
+                                    ->required(),
+                                TextInput::make('monto')
+                                    ->label('Monto unitario adicional')
+                                    ->numeric()
+                                    ->prefix('RD$')
+                                    ->required()
+                                    ->minValue(0.01),
+                            ])
+                            ->minItems(1)
+                            ->required(),
+                    ])
+                    ->action(function (Venta $record, array $data): void {
+                        try {
+                            $nd = app(VentaService::class)->emitirNotaDebito(
+                                $record, Filament::getTenant(), $data['detalles'], $data['motivo'],
+                            );
+                        } catch (VentaInvalidaException|SecuenciaNcfAgotadaException $e) {
+                            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                            return;
+                        }
+
+                        Notification::make()
+                            ->title("Nota de Débito {$nd->ncf} emitida")
+                            ->body('Se está enviando a la DGII.')
+                            ->success()
+                            ->send();
+                    })
+                    // E33 sobre e-CF aceptados, B03 sobre comprobantes físicos. Una venta sin
+                    // comprobante no tiene NCF que modificar.
+                    ->visible(fn (Venta $record) => $record->estado !== EstadoVenta::ANULADA
+                        && ! $record->esNotaCreditoDeAnulacion()
+                        && $record->tipo_comprobante !== null
+                        && (! $record->esElectronica() || $record->estado_fiscal->esAceptado())
+                        && (auth()->user()?->can('ventas.nota_debito') ?? false)),
+
+                // Devolución de un cliente, siempre en la caja de hoy. Documento según la venta:
+                // E34 (e-CF aceptado), B04 (física) o interna (sin comprobante). Ver
+                // VentaService::registrarDevolucion().
+                Action::make('devolucionParcial')
+                    ->label('Devolución')
+                    ->icon('heroicon-o-arrow-uturn-left')
+                    ->color('warning')
+                    ->modalHeading('Devolución de productos')
+                    ->modalDescription(fn (Venta $record): string => match (true) {
+                        $record->tipo_comprobante === null => 'Venta sin comprobante: se registra una devolución interna, sin NCF.',
+                        $record->esElectronica() => "Se emitirá una Nota de Crédito electrónica (E34) sobre {$record->ncf} y se enviará a la DGII.",
+                        default => "Se emitirá una Nota de Crédito física (B04) sobre {$record->ncf}.",
+                    })
+                    ->modalWidth('3xl')
+                    ->schema([
+                        Textarea::make('motivo')
+                            ->label('Motivo de la devolución')
+                            ->required()
+                            ->maxLength(255)
+                            ->rows(2),
+                        Repeater::make('detalles')
+                            ->label('Productos a devolver')
+                            ->schema([
+                                Select::make('detalle_venta_id')
+                                    ->label('Producto')
+                                    ->options(fn (Venta $record) => $record->detalles->mapWithKeys(fn ($d) => [
+                                        $d->id => "{$d->descripcion} (vendido: ".rtrim(rtrim((string) $d->cantidad, '0'), '.').')',
+                                    ]))
+                                    ->required(),
+                                TextInput::make('cantidad')
+                                    ->label('Cantidad a devolver')
+                                    ->numeric()
+                                    ->minValue(0.001)
+                                    ->required(),
+                                Select::make('destino')
+                                    ->label('¿Qué pasa con el producto?')
+                                    ->options(collect(DestinoDevolucion::cases())->mapWithKeys(fn (DestinoDevolucion $d) => [$d->value => $d->etiqueta()]))
+                                    ->default(DestinoDevolucion::INVENTARIO->value)
+                                    ->required(),
+                            ])
+                            ->columns(3)
+                            ->minItems(1)
+                            ->required(),
+                        Select::make('reembolso')
+                            ->label('Cómo se le devuelve el dinero')
+                            ->options(fn () => collect(Filament::getTenant()->config()->reembolsosPermitidos())
+                                ->mapWithKeys(fn (FormaReembolso $f) => [$f->value => $f->etiqueta()]))
+                            ->default(fn () => Filament::getTenant()->config()->reembolsosPermitidos()[0]->value ?? null)
+                            ->helperText(fn (Venta $record): ?string => $record->tipo_pago === TipoPago::CREDITO
+                                ? 'Venta a crédito: primero se rebaja lo que el cliente todavía debe; solo el resto se le devuelve.'
+                                : null),
+                    ])
+                    ->action(function (Venta $record, array $data): void {
+                        $empresa = Filament::getTenant();
+
+                        try {
+                            $nc = app(VentaService::class)->registrarDevolucion(
+                                $record,
+                                $empresa,
+                                $data['detalles'],
+                                $data['motivo'],
+                                filled($data['reembolso'] ?? null) ? FormaReembolso::from($data['reembolso']) : null,
+                                app(ArqueoCajaService::class)->arqueoAbiertoDe(auth()->id(), $empresa),
+                            );
+                        } catch (VentaInvalidaException|SecuenciaNcfAgotadaException $e) {
+                            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                            return;
+                        }
+
+                        $dinero = collect([
+                            $nc->monto_rebaja_cxc ? 'Se rebajaron RD$'.number_format((float) $nc->monto_rebaja_cxc, 2).' de la cuenta por cobrar.' : null,
+                            $nc->monto_reembolso ? 'Devuelve RD$'.number_format((float) $nc->monto_reembolso, 2).': '.mb_strtolower($nc->forma_reembolso->etiqueta()).'.' : null,
+                        ])->filter()->implode(' ');
+
+                        Notification::make()
+                            ->title(match (true) {
+                                $nc->tipo_comprobante === null => 'Devolución registrada',
+                                $nc->tipo_comprobante->esElectronico() => "Nota de Crédito {$nc->ncf} emitida; se está enviando a la DGII",
+                                default => "Nota de Crédito {$nc->ncf} emitida",
+                            })
+                            ->body($dinero)
+                            ->success()
+                            ->send();
+                    })
+                    ->visible(fn (Venta $record) => $record->estado !== EstadoVenta::ANULADA
+                        && ! $record->esNotaCreditoDeAnulacion()
+                        && (! $record->esElectronica() || $record->estado_fiscal->esAceptado())
+                        && Filament::getTenant()->config()->acepta_devoluciones
+                        && (auth()->user()?->can('ventas.devolucion') ?? false)),
+
+                self::refrescarEstadoAction(),
+                self::reintentarEnvioAction(),
+            ])
+            ->defaultSort('fecha', 'desc');
+    }
+
+    /**
+     * Mismo criterio dual que ImpresoraResource::probarImpresion(): si la impresora resuelta
+     * (del usuario que reimprime, o la predeterminada del módulo) es de RED, ->url() resuelve a
+     * null y se ejecuta ->action() en el servidor sin diálogo; si es NAVEGADOR o no hay ninguna
+     * configurada, ->url() abre el ticket en una pestaña para que el usuario elija su impresora.
+     */
+    public static function reimprimirTicketAction(): Action
+    {
+        return Action::make('reimprimirTicket')
+            ->label('Reimprimir ticket')
+            ->icon('heroicon-o-printer')
+            ->color('gray')
+            ->visible(fn (): bool => auth()->user()?->can('ventas.imprimir') ?? false)
+            ->action(function (Venta $record): void {
+                $impresora = app(ImpresionService::class)->resolverImpresora(ModuloImpresion::FACTURACION, auth()->user());
+                $resultado = app(ImpresionService::class)->imprimirTicket($record, $impresora);
+
+                if ($resultado['modo'] !== 'red') {
+                    return;
+                }
+
+                if ($resultado['exito']) {
+                    Notification::make()->title('Ticket impreso')->success()->send();
+
+                    return;
+                }
+
+                Notification::make()->title('No se pudo imprimir el ticket')->body($resultado['error'])->danger()->send();
+            })
+            ->url(function (Venta $record) {
+                // Se evalúa por cada fila del listado: la impresora es la misma para todas, así
+                // que se resuelve una sola vez por petición (antes, una consulta por venta).
+                $usuario = auth()->user();
+                $impresora = once(fn () => app(ImpresionService::class)->resolverImpresora(ModuloImpresion::FACTURACION, $usuario));
+
+                return $impresora?->esDeRed()
+                    ? null
+                    : app(ImpresionService::class)->urlTicket($record, $impresora?->ancho_papel ?? AnchoPapel::MM80);
+            }, shouldOpenInNewTab: true);
+    }
+
+    public static function refrescarEstadoAction(): Action
+    {
+        return Action::make('refrescarEstado')
+            ->label('Refrescar estado')
+            ->icon('heroicon-o-arrow-path')
+            ->color('gray')
+            ->visible(fn (Venta $record) => $record->pac_id !== null
+                && (auth()->user()?->can('ecf.gestionar') ?? false))
+            ->action(function (Venta $record): void {
+                $respuesta = app(EnvioEcfService::class)->refrescarEstado($record);
+                $record->refresh();
+
+                if (! $respuesta->exito) {
+                    Notification::make()->title($respuesta->errorMessage)->danger()->send();
+
+                    return;
+                }
+
+                Notification::make()
+                    ->title('Estado fiscal actualizado: '.self::etiquetaEstadoFiscal($record->estado_fiscal))
+                    ->success()
+                    ->send();
+            });
+    }
+
+    public static function reintentarEnvioAction(): Action
+    {
+        return Action::make('reintentarEnvio')
+            ->label('Reintentar envío')
+            ->icon('heroicon-o-paper-airplane')
+            ->color('warning')
+            ->visible(fn (Venta $record) => (auth()->user()?->can('ecf.gestionar') ?? false)
+                && EnviarEcfJob::puedeEnviarse($record)
+                && ($record->estado_fiscal === EstadoFiscal::PENDIENTE || isset($record->ecf_respuesta['error'])))
+            ->requiresConfirmation()
+            ->action(function (Venta $record): void {
+                EnviarEcfJob::dispatch($record);
+
+                Notification::make()->title('Reintento de envío encolado')->success()->send();
+            });
+    }
+
+    public static function getPages(): array
+    {
+        return [
+            'index' => Pages\ListVentas::route('/'),
+            'view' => Pages\ViewVenta::route('/{record}'),
+        ];
+    }
+
+    public static function etiquetaEstadoFiscal(EstadoFiscal $estado): string
+    {
+        return match ($estado) {
+            EstadoFiscal::NO_APLICA => 'No aplica',
+            EstadoFiscal::PENDIENTE => 'Pendiente',
+            EstadoFiscal::EN_PROCESO => 'En proceso',
+            EstadoFiscal::ACEPTADO => 'Aceptado',
+            EstadoFiscal::ACEPTADO_CONDICIONAL => 'Aceptado condicional',
+            EstadoFiscal::RECHAZADO => 'Rechazado',
+            // Consumo (32) por debajo del umbral: el PAC lo convirtió a RFCE (aceptado).
+            EstadoFiscal::RFCE => 'Aceptado (RFCE)',
+        };
+    }
+
+    public static function colorEstadoFiscal(EstadoFiscal $estado): string
+    {
+        return match ($estado) {
+            EstadoFiscal::ACEPTADO, EstadoFiscal::RFCE => 'success',
+            EstadoFiscal::ACEPTADO_CONDICIONAL => 'warning',
+            EstadoFiscal::RECHAZADO => 'danger',
+            EstadoFiscal::EN_PROCESO => 'info',
+            EstadoFiscal::PENDIENTE, EstadoFiscal::NO_APLICA => 'gray',
+        };
+    }
+}

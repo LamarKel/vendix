@@ -1,0 +1,207 @@
+<?php
+
+namespace App\Filament\Resources;
+
+use App\Enums\Modulo;
+use App\Enums\TipoDocumentoCliente;
+use App\Filament\Concerns\RestringidoPorModulo;
+use App\Filament\Resources\ClienteResource\Pages;
+use App\Filament\Resources\ClienteResource\RelationManagers;
+use App\Models\Cliente;
+use App\Services\Dgii\ConsultaContribuyenteService;
+use Filament\Actions\Action;
+use Filament\Facades\Filament;
+use Filament\Forms\Components\Placeholder;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
+use Filament\Notifications\Notification;
+use Filament\Resources\Resource;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Components\Utilities\Set;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Filters\TernaryFilter;
+use Filament\Tables\Table;
+
+class ClienteResource extends Resource
+{
+    use RestringidoPorModulo;
+
+    protected static ?string $model = Cliente::class;
+
+    public static function modulo(): Modulo
+    {
+        return Modulo::MAESTROS_CLIENTES;
+    }
+
+    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-users';
+
+    protected static ?string $navigationLabel = 'Clientes';
+
+    protected static ?string $modelLabel = 'Cliente';
+
+    protected static ?string $pluralModelLabel = 'Clientes';
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Comercial';
+
+    protected static ?int $navigationSort = 1;
+
+    public static function form(Schema $schema): Schema
+    {
+        return $schema
+            ->columns(2)
+            ->components([
+                Select::make('tipo_documento')
+                    ->label('Tipo de documento')
+                    ->options([
+                        TipoDocumentoCliente::RNC->value => 'RNC',
+                        TipoDocumentoCliente::CEDULA->value => 'Cédula',
+                        TipoDocumentoCliente::SIN_DOCUMENTO->value => 'Sin documento',
+                    ])
+                    ->required()
+                    ->default(TipoDocumentoCliente::CEDULA->value),
+
+                TextInput::make('documento')
+                    ->label('Documento')
+                    ->maxLength(20)
+                    ->helperText('RNC (9 dígitos) o Cédula (11 dígitos).')
+                    ->suffixAction(
+                        Action::make('buscarDgii')
+                            ->label('Buscar en DGII')
+                            ->icon('heroicon-o-magnifying-glass')
+                            ->action(function (Get $get, Set $set): void {
+                                $resultado = app(ConsultaContribuyenteService::class)->buscar(
+                                    (string) ($get('documento') ?? ''),
+                                    Filament::getTenant(),
+                                );
+
+                                if ($resultado === null) {
+                                    Notification::make()
+                                        ->title('No encontrado')
+                                        ->body('Ingresa un RNC (9 dígitos) o Cédula (11 dígitos) válido y registrado en la DGII/JCE.')
+                                        ->warning()
+                                        ->send();
+
+                                    return;
+                                }
+
+                                $set('documento', $resultado['documento']);
+                                $set('nombre', $resultado['nombre']);
+                                $set('tipo_documento', $resultado['tipo']->value);
+
+                                Notification::make()->title('Datos cargados desde la DGII/JCE')->success()->send();
+                            })
+                    ),
+
+                TextInput::make('nombre')
+                    ->label('Nombre completo / Razón social')
+                    ->required()
+                    ->maxLength(255)
+                    ->columnSpanFull(),
+
+                TextInput::make('telefono')
+                    ->label('Teléfono')
+                    ->tel()
+                    ->regex('/^[\d\s\+\-\(\)]+$/')
+                    ->validationMessages(['regex' => 'Solo dígitos, espacios, +, - y paréntesis.'])
+                    ->maxLength(20),
+
+                TextInput::make('email')
+                    ->label('Correo electrónico')
+                    ->email()
+                    ->maxLength(255),
+
+                Textarea::make('direccion')
+                    ->label('Dirección')
+                    ->rows(2)
+                    ->columnSpanFull(),
+
+                Select::make('lista_precio_id')
+                    ->label('Lista de precio')
+                    ->relationship('listaPrecio', 'nombre', modifyQueryUsing: fn ($query) => $query->where('empresa_id', Filament::getTenant()->id)->where('activa', true))
+                    ->placeholder('Precio base (sin lista)')
+                    ->searchable()
+                    ->preload(),
+
+                Toggle::make('activo')
+                    ->label('Activo')
+                    ->default(true),
+
+                Placeholder::make('saldo_favor_display')
+                    ->label('Saldo a favor')
+                    ->content(fn (?Cliente $record) => $record ? 'RD$ '.number_format((float) $record->saldo_favor, 2) : '—')
+                    ->visibleOn('edit'),
+            ]);
+    }
+
+    public static function table(Table $table): Table
+    {
+        return $table
+            ->columns([
+                TextColumn::make('nombre')
+                    ->label('Nombre')
+                    ->searchable()
+                    ->sortable(),
+
+                TextColumn::make('tipo_documento')
+                    ->label('Tipo doc.')
+                    ->formatStateUsing(fn ($state) => match ($state) {
+                        TipoDocumentoCliente::RNC => 'RNC',
+                        TipoDocumentoCliente::CEDULA => 'Cédula',
+                        TipoDocumentoCliente::SIN_DOCUMENTO => '—',
+                        default => $state,
+                    })
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('documento')
+                    ->label('Documento')
+                    ->searchable()
+                    ->placeholder('—'),
+
+                TextColumn::make('telefono')
+                    ->label('Teléfono')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('email')
+                    ->label('Correo')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('saldo_favor')
+                    ->label('Saldo a favor')
+                    ->money('DOP')
+                    ->sortable()
+                    ->toggleable()
+                    ->color(fn ($state) => bccomp((string) ($state ?? '0'), '0.00', 2) > 0 ? 'success' : null),
+
+                ToggleColumn::make('activo')
+                    ->label('Activo')
+                    ->disabled(fn (): bool => ! auth()->user()?->can('clientes.desactivar'))
+                    ->sortable(),
+            ])
+            ->filters([
+                TernaryFilter::make('activo')->label('Activo')->default(true),
+            ])
+            ->defaultSort('nombre');
+    }
+
+    public static function getRelations(): array
+    {
+        return [
+            RelationManagers\MovimientosSaldoRelationManager::class,
+        ];
+    }
+
+    public static function getPages(): array
+    {
+        return [
+            'index' => Pages\ListClientes::route('/'),
+            'create' => Pages\CreateCliente::route('/create'),
+            'edit' => Pages\EditCliente::route('/{record}/edit'),
+        ];
+    }
+}

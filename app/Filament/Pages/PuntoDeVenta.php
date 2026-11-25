@@ -1,0 +1,1417 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Filament\Pages;
+
+use App\Enums\FormaPago;
+use App\Enums\ModoImpresionPos;
+use App\Enums\Modulo;
+use App\Enums\ModuloImpresion;
+use App\Enums\OrigenVenta;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoPago;
+use App\Enums\TipoVenta;
+use App\Exceptions\VentaInvalidaException;
+use App\Filament\Concerns\RestringidoPorModulo;
+use App\Models\ArqueoCaja;
+use App\Models\Cliente;
+use App\Models\Descuento;
+use App\Models\Empresa;
+use App\Models\Producto;
+use App\Models\ProductoPresentacion;
+use App\Models\Promocion;
+use App\Models\Venta;
+use App\Services\ArqueoCajaService;
+use App\Services\Dgii\ConsultaContribuyenteService;
+use App\Services\Impresion\ImpresionService;
+use App\Services\PromocionService;
+use App\Services\SaldoFavorService;
+use App\Services\SecuenciaNcfService;
+use App\Services\VentaService;
+use App\Support\MensajeError;
+use BackedEnum;
+use Filament\Actions\Action;
+use Filament\Facades\Filament;
+use Filament\Notifications\Notification;
+use Filament\Pages\Page;
+use Filament\Support\Icons\Heroicon;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Collection;
+use Illuminate\Validation\ValidationException;
+use RuntimeException;
+
+class PuntoDeVenta extends Page
+{
+    /**
+     * Valor del selector de comprobante para "Sin comprobante" (venta sin NCF). Un centinela y no
+     * '' porque un tipo en blanco ya significa "ninguno elegido" en este componente; solo se
+     * ofrece si la empresa lo habilitó (EmpresaConfiguracion::permite_ventas_sin_comprobante).
+     */
+    public const SIN_COMPROBANTE = 'sin_comprobante';
+
+    /** Límite práctico para campos de monto de pago: cabe holgado en decimal(14,2). */
+    public const MAX_MONTO_PAGO = '99999999.99';
+
+    use RestringidoPorModulo;
+
+    protected string $view = 'filament.pages.punto-de-venta';
+
+    protected static string|BackedEnum|null $navigationIcon = Heroicon::OutlinedShoppingCart;
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Operaciones';
+
+    protected static ?int $navigationSort = 2;
+
+    protected static ?string $navigationLabel = 'Facturación';
+
+    protected static ?string $title = 'Facturación';
+
+    public ?int $clienteId = null;
+
+    public string $tipoComprobante = '';
+
+    public string $busquedaCliente = '';
+
+    public string $busquedaProducto = '';
+
+    /** @var array<int, array<string, mixed>> */
+    public array $carrito = [];
+
+    /** Id (como string) del Descuento elegido en el <select>; '' = sin descuento. */
+    public string $descuentoId = '';
+
+    /**
+     * Monto en pesos del descuento global, calculado a partir de $descuentoId y el subtotal del
+     * carrito (ver recalcularTotales()). Ya no es un input libre: el usuario elige un Descuento
+     * configurado por el Administrador (Mantenimiento de Descuentos) y esto se deriva solo.
+     */
+    public string $descuentoGlobal = '0.00';
+
+    public string $formaPago = 'efectivo';
+
+    /**
+     * Monto recibido en efectivo (usado cuando formaPago es EFECTIVO o MIXTO).
+     * Cuando es EFECTIVO puro, si montoEfectivo > total se calcula vuelto.
+     * Cuando es MIXTO, montoEfectivo + montoTarjeta debe cubrir el total.
+     */
+    public string $montoEfectivo = '';
+
+    /** Monto cobrado por tarjeta (solo cuando formaPago = MIXTO). */
+    public string $montoTarjeta = '';
+
+    public bool $ventaACredito = false;
+
+    public string $fechaLimitePago = '';
+
+    /** Marcar para dejar el vuelto como saldo a favor del cliente (requiere cliente seleccionado). */
+    public bool $dejarVueltoEnFondo = false;
+
+    /** Monto de saldo a favor del cliente a aplicar como pago parcial/total. */
+    public string $usarSaldoFavor = '0.00';
+
+    /** @var array<string, string> */
+    public array $totales = [];
+
+    public static function modulo(): Modulo
+    {
+        return Modulo::VENTAS_POS;
+    }
+
+    public static function puedeAccederPorPermiso(): bool
+    {
+        return auth()->user()?->can('facturacion.acceder') ?? false;
+    }
+
+    public function mount(): void
+    {
+        $this->tipoComprobante = TipoComprobante::defectoParaEmpresa($this->empresa()->config(), $this->usaEcf())->value;
+
+        // Si el tipo por defecto no tiene secuencia cargada (p. ej. empresa que solo tiene B01/B02
+        // pero su default es E32), arrancar con el primero que sí se puede emitir. Sin ninguno
+        // disponible se deja el default: al cobrar, SecuenciaNcfService explica qué falta cargar.
+        $tipos = $this->tiposComprobante();
+
+        if ($tipos !== [] && ! array_key_exists($this->tipoComprobante, $tipos)) {
+            $this->tipoComprobante = (string) array_key_first($tipos);
+        }
+
+        // Sin cliente = venta al portador: el cajero solo busca uno si el comprobante lo exige.
+        $this->clienteId = null;
+        $this->recalcularTotales();
+    }
+
+    public function updated(string $name): void
+    {
+        // Descuento que ya no existe, se desactivó o no es de esta empresa: se quita y se avisa,
+        // en vez de dejar el total en 0.00 sin explicación.
+        if ($name === 'descuentoId' && filled($this->descuentoId) && $this->descuentoSeleccionado() === null) {
+            $this->descuentoId = '';
+
+            Notification::make()->title('Ese descuento ya no está disponible.')->warning()->send();
+        }
+
+        if ($name === 'descuentoId' && filled($this->descuentoId) && ! $this->puedeAplicarDescuento()) {
+            $this->descuentoId = '';
+
+            Notification::make()->title('No tiene permiso para aplicar descuentos.')->warning()->send();
+        }
+
+        if ($name === 'clienteId') {
+            $this->revalorarPorCambioDeCliente();
+        }
+
+        if ($name === 'descuentoId' || str($name)->startsWith('carrito.')) {
+            $this->recalcularTotales();
+        }
+    }
+
+    /**
+     * El POS es una página propia (no un Resource ni un ->relationship() de Filament), así que
+     * sus consultas directas a Cliente/Producto no heredan el scoping automático por tenant:
+     * hay que filtrar por empresa_id explícitamente en cada una (ver docs/estilos.md... el
+     * comentario real: PASO 5 del prompt de tenancy — este es justo el punto que advertía que
+     * se filtran datos entre empresas si se olvida).
+     */
+    public function usaEcf(): bool
+    {
+        return $this->empresa()->usaEcf();
+    }
+
+    protected function empresa(): Empresa
+    {
+        /** @var Empresa */
+        return Filament::getTenant();
+    }
+
+    protected function empresaId(): int
+    {
+        return $this->empresa()->id;
+    }
+
+    public function clienteSeleccionado(): ?Cliente
+    {
+        return $this->clienteId
+            ? Cliente::query()->where('empresa_id', $this->empresaId())->find($this->clienteId)
+            : null;
+    }
+
+    /** Saldo a favor disponible del cliente seleccionado (para mostrar en la vista). */
+    public function saldoFavorCliente(): string
+    {
+        $cliente = $this->clienteSeleccionado();
+
+        return $cliente ? (string) $cliente->saldo_favor : '0.00';
+    }
+
+    /** @return Collection<int, Cliente> */
+    public function clientesSugeridos(): Collection
+    {
+        if (blank($this->busquedaCliente)) {
+            return collect();
+        }
+
+        return Cliente::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->where(fn (Builder $q) => $q
+                ->whereLikeSinAcentos('nombre', $this->busquedaCliente)
+                ->orWhere('documento', 'ilike', "%{$this->busquedaCliente}%"))
+            ->orderBy('nombre')
+            ->limit(10)
+            ->get();
+    }
+
+    public function seleccionarCliente(int $clienteId): void
+    {
+        $this->clienteId = $clienteId;
+        $this->busquedaCliente = '';
+
+        // El cliente puede traer su propia lista de precio: el carrito se vuelve a valorar.
+        $this->revalorarPorCambioDeCliente();
+
+        if (($lista = $this->listaPrecioAplicada()) !== null && ! empty($this->carrito)) {
+            Notification::make()->title("Se aplicó la lista de precio «{$lista}».")->info()->send();
+        }
+    }
+
+    /** Vuelve a "Al portador" / Consumidor Final (sin cliente). */
+    public function quitarCliente(): void
+    {
+        $this->clienteId = null;
+        $this->busquedaCliente = '';
+        $this->revalorarPorCambioDeCliente();
+    }
+
+    /**
+     * Con carrito vacío no hay nada que revalorar (y en el POS táctil recalcular republicaría la
+     * pantalla del cliente, pisando el "gracias" que queda justo después de cobrar).
+     */
+    protected function revalorarPorCambioDeCliente(): void
+    {
+        if (! empty($this->carrito)) {
+            $this->recalcularTotales();
+        }
+    }
+
+    /** Alias para el botón "Consumidor Final" de la vista de Caja. */
+    public function seleccionarConsumidorFinal(): void
+    {
+        $this->quitarCliente();
+    }
+
+    public function esSinComprobante(): bool
+    {
+        return $this->tipoComprobante === self::SIN_COMPROBANTE;
+    }
+
+    /**
+     * Busca el documento tecleado en busquedaCliente contra la DGII/JCE (vía el PAC); si lo
+     * encuentra, crea (o reutiliza, si ya existe con ese documento) el Cliente y lo selecciona.
+     */
+    public function buscarClienteEnDgii(): void
+    {
+        $resultado = app(ConsultaContribuyenteService::class)->buscar($this->busquedaCliente, $this->empresa());
+
+        if ($resultado === null) {
+            Notification::make()
+                ->title('No encontrado')
+                ->body('Ingresa un RNC (9 dígitos) o Cédula (11 dígitos) válido y registrado en la DGII/JCE.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        // documento no es único entre empresas: sin empresa_id en la búsqueda, esto podría
+        // encontrar (y reutilizar) el cliente de OTRA empresa con el mismo documento.
+        $cliente = Cliente::query()->firstOrCreate(
+            ['empresa_id' => $this->empresaId(), 'documento' => $resultado['documento']],
+            ['nombre' => $resultado['nombre'], 'tipo_documento' => $resultado['tipo'], 'activo' => true],
+        );
+
+        $this->clienteId = $cliente->id;
+        $this->busquedaCliente = '';
+        $this->revalorarPorCambioDeCliente();
+
+        Notification::make()->title("Cliente cargado desde la DGII/JCE: {$cliente->nombre}")->success()->send();
+    }
+
+    /**
+     * Crédito Fiscal (31) siempre exige RNC del comprador; Consumo (32) lo exige en vivo en
+     * cuanto el total del carrito cruza Venta::UMBRAL_CONSUMO. Misma regla que
+     * VentaService::registrar()/EcfBuilder (Venta::requiereComprador), evaluada aquí sobre una
+     * Venta "en memoria" con el tipo y el total actuales del carrito.
+     */
+    public function requiereRncComprador(): bool
+    {
+        // La regla de RNC obligatorio es del TIPO de comprobante (Crédito Fiscal siempre; Consumo
+        // desde el umbral), no una particularidad del e-CF: aplica igual a un B01/B02 físico.
+        if (blank($this->tipoComprobante) || $this->esSinComprobante()) {
+            return false;
+        }
+
+        return (new Venta([
+            'tipo_comprobante' => $this->tipoComprobante,
+            'total' => $this->totales['total'] ?? '0.00',
+        ]))->requiereComprador();
+    }
+
+    public function faltaRncComprador(): bool
+    {
+        return $this->requiereRncComprador() && blank($this->clienteSeleccionado()?->documento);
+    }
+
+    /**
+     * true si la venta necesita un cliente y no hay ninguno (al portador): a crédito, o un tipo
+     * de comprobante que identifica al comprador (Venta::requiereCliente()). Misma regla que
+     * VentaService::registrar().
+     */
+    public function faltaCliente(): bool
+    {
+        if ($this->clienteSeleccionado() !== null) {
+            return false;
+        }
+
+        if ($this->ventaACredito) {
+            return true;
+        }
+
+        if (blank($this->tipoComprobante) || $this->esSinComprobante()) {
+            return false;
+        }
+
+        return (new Venta([
+            'tipo_comprobante' => $this->tipoComprobante,
+            'total' => $this->totales['total'] ?? '0.00',
+        ]))->requiereCliente();
+    }
+
+    /** Mismo mensaje (y motivo) que bloquearía VentaService::registrar() al intentar cobrar. */
+    public function mensajeFaltaRncComprador(): ?string
+    {
+        if ($this->faltaCliente()) {
+            return $this->ventaACredito && $this->clienteSeleccionado() === null
+                ? 'Una venta a crédito requiere seleccionar un cliente.'
+                : 'Este tipo de comprobante requiere seleccionar un cliente'.($this->requiereRncComprador() ? ' con RNC/Cédula.' : '.');
+        }
+
+        if (! $this->faltaRncComprador()) {
+            return null;
+        }
+
+        return $this->tipoComprobante === TipoComprobante::FACTURA_CREDITO_FISCAL->value
+            ? 'La Factura de Crédito Fiscal (e-CF 31) requiere el RNC del comprador. Cambia el cliente o búscalo por RNC en la DGII abajo.'
+            : 'Para facturas de consumo de RD$250,000 o más, el cliente con RNC/Cédula es obligatorio. Cambia el cliente o búscalo por RNC en la DGII abajo.';
+    }
+
+    /**
+     * Un solo buscador para todo: nombre de producto (parcial), código interno/SKU (parcial),
+     * código de barras de cualquier presentación (exacto — así no se disparan falsos positivos
+     * mientras se teclea un código a medias) y, si el producto es CONTABLE, nombre de su
+     * presentación (parcial). Cada presentación activa de un producto CONTABLE es su propia fila
+     * (no se colapsan en una sola fila por producto): así se puede elegir "Caja" o "Six-pack"
+     * directamente desde la lista, cada una con su propio precio. PESADO solo tiene una fila (no
+     * hay presentaciones con código fijo); productos CONTABLE sin ninguna presentación cargada
+     * (compatibilidad con datos viejos) caen en una fila "suelta" que se agrega como antes.
+     *
+     * @return Collection<int, array<string, mixed>>
+     */
+    public function resultadosBusqueda(): Collection
+    {
+        $texto = trim($this->busquedaProducto);
+
+        if ($texto === '') {
+            return collect();
+        }
+
+        $productos = Producto::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->where(fn (Builder $q) => $q
+                ->whereLikeSinAcentos('nombre', $texto)
+                ->orWhere('codigo', 'ilike', "%{$texto}%")
+                ->orWhereHas('presentaciones', fn (Builder $p) => $p
+                    ->where('activa', true)
+                    ->where(fn (Builder $pp) => $pp
+                        ->where('codigo_barra', 'ilike', $texto)
+                        ->orWhereLikeSinAcentos('nombre', $texto))))
+            ->with(['presentaciones' => fn ($q) => $q
+                ->where('activa', true)
+                ->orderByDesc('es_base')
+                ->orderBy('nombre')])
+            ->orderBy('nombre')
+            ->limit(10)
+            ->get();
+
+        $filas = collect();
+
+        foreach ($productos as $producto) {
+            if ($producto->tipo_venta === TipoVenta::PESADO) {
+                $filas->push($this->filaPesado($producto));
+
+                continue;
+            }
+
+            if ($producto->presentaciones->isEmpty()) {
+                $filas->push($this->filaProductoSinPresentaciones($producto));
+
+                continue;
+            }
+
+            foreach ($producto->presentaciones as $presentacion) {
+                $filas->push($this->filaPresentacion($producto, $presentacion));
+            }
+        }
+
+        return $filas->take(15);
+    }
+
+    /** @return array<string, mixed> */
+    private function filaPresentacion(Producto $producto, ProductoPresentacion $presentacion): array
+    {
+        return [
+            'tipo' => 'presentacion',
+            'producto_id' => $producto->id,
+            'presentacion_id' => $presentacion->id,
+            'etiqueta' => "{$producto->nombre} · {$presentacion->nombre}",
+            'imagen' => $producto->imagen,
+            'precio_texto' => 'RD$ '.number_format((float) $presentacion->precio, 2),
+            'controla_stock' => $producto->controla_stock,
+            'stock' => (float) $producto->stock,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function filaProductoSinPresentaciones(Producto $producto): array
+    {
+        return [
+            'tipo' => 'presentacion',
+            'producto_id' => $producto->id,
+            'presentacion_id' => null,
+            'etiqueta' => $producto->nombre,
+            'imagen' => $producto->imagen,
+            'precio_texto' => 'RD$ '.number_format((float) $producto->precio, 2),
+            'controla_stock' => $producto->controla_stock,
+            'stock' => (float) $producto->stock,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function filaPesado(Producto $producto): array
+    {
+        return [
+            'tipo' => 'pesado',
+            'producto_id' => $producto->id,
+            'presentacion_id' => null,
+            'etiqueta' => $producto->nombre,
+            'imagen' => $producto->imagen,
+            'precio_texto' => 'RD$ '.number_format((float) $producto->precio_por_peso, 2).' / '.$producto->unidad_base,
+            'controla_stock' => $producto->controla_stock,
+            'stock' => (float) $producto->stock,
+        ];
+    }
+
+    /**
+     * Un lector de código de barras funciona como un teclado: "teclea" el código muy rápido y
+     * termina con Enter — no hace falta driver ni integración especial, basta con escuchar el
+     * mismo evento que dispararía un cajero al terminar de escribir a mano (wire:keydown.enter
+     * en el buscador). Si el texto coincide EXACTO con el código de barras de una presentación o
+     * el código/código de barras del producto, se agrega directo al carrito y el campo queda
+     * listo para el siguiente escaneo. Si no hay coincidencia exacta, no se hace nada más: la
+     * búsqueda de abajo (resultadosBusqueda(), ya reactiva vía wire:model.live) sigue mostrando
+     * resultados sin que esto interfiera.
+     *
+     * $texto viaja como parámetro ($event.target.value, ver la vista) en vez de leerse siempre de
+     * $this->busquedaProducto: el input además lleva wire:model.live.debounce.300ms, y un lector
+     * de código de barras dispara el Enter casi inmediatamente después del último carácter — más
+     * rápido que el debounce. Sin el parámetro, escanearOBuscar() podía correr ANTES de que el
+     * valor debounced llegara al servidor y encontrar $busquedaProducto vacío o desactualizado
+     * ("a veces no encuentra nada" con el escáner). Sigue aceptando el caso sin parámetro (tests,
+     * o cualquier otro disparador) para no romper nada que ya llamaba a este método así.
+     */
+    public function escanearOBuscar(?string $texto = null): void
+    {
+        $texto = trim($texto ?? $this->busquedaProducto);
+        $this->busquedaProducto = $texto;
+
+        if ($texto === '') {
+            return;
+        }
+
+        $presentacion = $this->buscarPresentacionPorCodigo($texto);
+
+        if ($presentacion !== null) {
+            if (! $this->validarProductoParaVenta($presentacion->producto)) {
+                return;
+            }
+
+            $this->agregarLineaContable($presentacion->producto, $presentacion);
+            $this->busquedaProducto = '';
+            $this->dispatch('producto-escaneado');
+
+            return;
+        }
+
+        $producto = Producto::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where(fn (Builder $q) => $q->where('codigo_barra', 'ilike', $texto)->orWhere('codigo', 'ilike', $texto))
+            ->first();
+
+        if ($producto === null) {
+            return;
+        }
+
+        if (! $this->validarProductoParaVenta($producto)) {
+            return;
+        }
+
+        if ($producto->tipo_venta === TipoVenta::PESADO) {
+            // No se agrega solo: el peso varía en cada venta y hay que capturarlo a mano en el
+            // buscador (el listado de sugerencias, ya visible, trae el campo de peso).
+            Notification::make()
+                ->title("«{$producto->nombre}» se vende por peso")
+                ->body('Ingresa el peso en el resultado de abajo para agregarlo.')
+                ->warning()
+                ->send();
+
+            return;
+        }
+
+        $this->agregarLineaContable($producto, $producto->presentacionBase());
+        $this->busquedaProducto = '';
+        $this->dispatch('producto-escaneado');
+    }
+
+    public function agregarProducto(int $productoId): void
+    {
+        $producto = Producto::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->find($productoId);
+
+        if ($producto === null || $producto->tipo_venta === TipoVenta::PESADO) {
+            return;
+        }
+
+        $this->agregarLineaContable($producto, $producto->presentacionBase());
+        $this->busquedaProducto = '';
+    }
+
+    /**
+     * Agrega una presentación ESPECÍFICA elegida en resultadosBusqueda() (no necesariamente la
+     * base): a diferencia de agregarProducto(), que siempre resuelve la presentación base.
+     */
+    public function agregarPresentacion(int $presentacionId): void
+    {
+        $presentacion = ProductoPresentacion::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activa', true)
+            ->with('producto')
+            ->find($presentacionId);
+
+        if ($presentacion === null || $presentacion->producto === null) {
+            return;
+        }
+
+        if (! $this->validarProductoParaVenta($presentacion->producto)) {
+            return;
+        }
+
+        $this->agregarLineaContable($presentacion->producto, $presentacion);
+        $this->busquedaProducto = '';
+    }
+
+    /**
+     * Venta por peso (habichuelas, carnes...): el peso no viene de un código de barras fijo, se
+     * captura a mano en el momento. Cada captura es una línea nueva (no se suma a una anterior:
+     * dos pesadas del mismo producto son dos pesos distintos, no una cantidad acumulable).
+     */
+    public function agregarProductoPorPeso(int $productoId, string $peso): void
+    {
+        $producto = Producto::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->where('tipo_venta', TipoVenta::PESADO->value)
+            ->find($productoId);
+
+        if ($producto === null) {
+            return;
+        }
+
+        if ((float) $peso <= 0) {
+            Notification::make()->title('Ingresa un peso mayor a cero.')->danger()->send();
+
+            return;
+        }
+
+        if (! $this->validarProductoParaVenta($producto)) {
+            return;
+        }
+
+        $this->carrito[] = [
+            'producto_id' => $producto->id,
+            'presentacion_id' => null,
+            'codigo' => $producto->codigo,
+            'nombre' => $producto->nombre,
+            'precio_unitario' => (string) ($producto->precio_por_peso ?? 0),
+            'cantidad' => $peso,
+            'descuento' => '0.00',
+            'controla_stock' => $producto->controla_stock,
+            'factor' => '1',
+            'tipo_venta' => TipoVenta::PESADO->value,
+            'unidad_base' => $producto->unidad_base,
+        ];
+
+        $this->busquedaProducto = '';
+        $this->recalcularTotales();
+    }
+
+    public function quitarLinea(int $indice): void
+    {
+        unset($this->carrito[$indice]);
+        $this->carrito = array_values($this->carrito);
+        $this->recalcularTotales();
+    }
+
+    /** Quita la última línea del carrito (atajo Supr). */
+    public function quitarUltimaLinea(): void
+    {
+        if (empty($this->carrito)) {
+            return;
+        }
+
+        array_pop($this->carrito);
+        $this->recalcularTotales();
+    }
+
+    /** Vacía el carrito completo (atajo F9). */
+    public function limpiarCarrito(): void
+    {
+        $this->carrito = [];
+        $this->descuentoId = '';
+        $this->descuentoGlobal = '0.00';
+        $this->busquedaProducto = '';
+        $this->recalcularTotales();
+    }
+
+    public function stockDeLinea(array $linea): ?float
+    {
+        if (! $linea['controla_stock']) {
+            return null;
+        }
+
+        return (float) (Producto::query()->where('empresa_id', $this->empresaId())->find($linea['producto_id'])?->stock ?? 0);
+    }
+
+    /**
+     * El stock siempre se compara en unidad base: cantidad × factor (una caja de 24 consume 24
+     * unidades base aunque la línea diga cantidad 1). Para peso, factor es 1 y cantidad es el
+     * peso mismo, así que la misma fórmula sirve para ambos casos.
+     */
+    public function lineaConStockInsuficiente(array $linea): bool
+    {
+        // Con "vender sin stock" activo no se bloquea: la venta deja el producto en negativo y
+        // queda marcada en el Kardex (ver InventarioService).
+        if ($this->permiteVenderSinStock()) {
+            return false;
+        }
+
+        $stock = $this->stockDeLinea($linea);
+
+        if ($stock === null) {
+            return false;
+        }
+
+        $cantidadBase = (float) $linea['cantidad'] * (float) ($linea['factor'] ?? 1);
+
+        return $cantidadBase > $stock;
+    }
+
+    protected function validarProductoParaVenta(Producto $producto): bool
+    {
+        if (! $producto->activo) {
+            Notification::make()->title("«{$producto->nombre}» está inactivo y no se puede vender")->danger()->send();
+
+            return false;
+        }
+
+        if ($producto->controla_stock && (float) $producto->stock <= 0) {
+            if ($this->permiteVenderSinStock()) {
+                Notification::make()
+                    ->title("«{$producto->nombre}» no tiene stock en el sistema")
+                    ->body('Se puede vender igual: el producto quedará en negativo hasta que entre la compra o se ajuste.')
+                    ->warning()
+                    ->send();
+
+                return true;
+            }
+
+            Notification::make()->title("«{$producto->nombre}» no tiene stock disponible")->danger()->send();
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /** Configuración de la empresa: ¿se puede vender un producto sin stock (queda en negativo)? */
+    public function permiteVenderSinStock(): bool
+    {
+        return $this->empresa()->config()->permite_stock_negativo;
+    }
+
+    private function buscarPresentacionPorCodigo(string $texto): ?ProductoPresentacion
+    {
+        return ProductoPresentacion::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activa', true)
+            ->where('codigo_barra', 'ilike', $texto)
+            ->whereHas('producto', fn (Builder $q) => $q->where('activo', true))
+            ->with('producto')
+            ->first();
+    }
+
+    /** Agrega (o suma 1 a) una línea CONTABLE: por presentación si se resolvió una, o el producto suelto si no tiene ninguna (compatibilidad con productos sin presentaciones). */
+    protected function agregarLineaContable(Producto $producto, ?ProductoPresentacion $presentacion): void
+    {
+        $presentacionId = $presentacion?->id;
+
+        foreach ($this->carrito as $indice => $linea) {
+            if ($linea['producto_id'] === $producto->id && ($linea['presentacion_id'] ?? null) === $presentacionId) {
+                $this->carrito[$indice]['cantidad']++;
+                $this->recalcularTotales();
+
+                return;
+            }
+        }
+
+        $this->carrito[] = [
+            'producto_id' => $producto->id,
+            'presentacion_id' => $presentacionId,
+            'codigo' => $presentacion?->codigo_barra ?? $producto->codigo,
+            'nombre' => $this->nombreLineaContable($producto, $presentacion),
+            'precio_unitario' => (string) ($presentacion?->precio ?? $producto->precio),
+            'cantidad' => 1,
+            'descuento' => '0.00',
+            'controla_stock' => $producto->controla_stock,
+            'factor' => (string) ($presentacion?->factor ?? 1),
+            'tipo_venta' => TipoVenta::CONTABLE->value,
+            'unidad_base' => $producto->unidad_base,
+        ];
+
+        $this->recalcularTotales();
+    }
+
+    private function nombreLineaContable(Producto $producto, ?ProductoPresentacion $presentacion): string
+    {
+        if ($presentacion !== null && ! $presentacion->es_base) {
+            return "{$producto->nombre} - {$presentacion->nombre}";
+        }
+
+        return $producto->nombre;
+    }
+
+    public function hayLineasConStockInsuficiente(): bool
+    {
+        foreach ($this->carrito as $linea) {
+            if ($this->lineaConStockInsuficiente($linea)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    public function subtotalLinea(array $linea): string
+    {
+        return bcsub(bcmul((string) $linea['precio_unitario'], (string) $linea['cantidad'], 2), (string) $linea['descuento'], 2);
+    }
+
+    public function proximoNcf(): ?string
+    {
+        if (blank($this->tipoComprobante) || $this->esSinComprobante()) {
+            return null;
+        }
+
+        // Un comprobante físico (tipo B) también tiene un próximo NCF real, solo que nunca se
+        // transmite al PAC — la previsualización aplica igual que para uno electrónico.
+        return app(SecuenciaNcfService::class)->previsualizarSiguiente(TipoComprobante::from($this->tipoComprobante), $this->empresa());
+    }
+
+    /**
+     * Tipos seleccionables en el POS: nunca los de Compras (no son de venta), y solo los que
+     * SecuenciaNcfService::tiposDisponibles() da por emitibles (secuencia con números disponibles;
+     * electrónicos solo con e-CF habilitado). Sin esto, el selector ofrecería un tipo que
+     * VentaService::registrar() rechazaría al cobrar.
+     *
+     * @return array<string, string>
+     */
+    public function tiposComprobante(): array
+    {
+        $disponibles = app(SecuenciaNcfService::class)->tiposDisponibles($this->empresa());
+
+        $tipos = collect(TipoComprobante::cases())
+            ->filter(fn (TipoComprobante $tipo) => $tipo->esDeVenta())
+            ->filter(fn (TipoComprobante $tipo) => in_array($tipo, $disponibles, true))
+            ->mapWithKeys(fn (TipoComprobante $tipo) => [$tipo->value => "{$tipo->value} — {$tipo->etiqueta()}"])
+            ->all();
+
+        return $this->permiteSinComprobante()
+            ? [self::SIN_COMPROBANTE => Venta::ETIQUETA_SIN_COMPROBANTE] + $tipos
+            : $tipos;
+    }
+
+    public function permiteSinComprobante(): bool
+    {
+        return (bool) $this->empresa()->config()->permite_ventas_sin_comprobante;
+    }
+
+    /** @return array<string, string> */
+    public function formasPago(): array
+    {
+        return collect(FormaPago::cases())
+            ->mapWithKeys(fn (FormaPago $forma) => [$forma->value => $forma->etiqueta()])
+            ->all();
+    }
+
+    /** @return Collection<int, Descuento> */
+    public function descuentosDisponibles(): Collection
+    {
+        if (! auth()->user()?->can('ventas.aplicar_descuento')) {
+            return collect();
+        }
+
+        return Descuento::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->orderBy('nombre')
+            ->get();
+    }
+
+    /**
+     * Re-valida $descuentoId contra empresa_id/activo en cada uso (no confía en lo que llegó del
+     * navegador): un id de otra empresa, o de un descuento ya desactivado, simplemente no aplica
+     * ningún descuento en vez de filtrar datos entre empresas.
+     */
+    public function descuentoSeleccionado(): ?Descuento
+    {
+        if (blank($this->descuentoId)) {
+            return null;
+        }
+
+        return Descuento::query()
+            ->where('empresa_id', $this->empresaId())
+            ->where('activo', true)
+            ->find((int) $this->descuentoId);
+    }
+
+    /**
+     * Promociones vigentes de la empresa actual, para mostrar en la UI del POS.
+     * Los descuentos por promoción se aplican automáticamente en VentaService::calcularLineas().
+     *
+     * @return Collection<int, Promocion>
+     */
+    public function promocionesVigentes(): Collection
+    {
+        return app(PromocionService::class)->vigentes($this->empresa());
+    }
+
+    /**
+     * IDs de productos que tienen una promoción vigente, para marcar visualmente en el carrito.
+     *
+     * @return array<int, int>
+     */
+    public function productosEnPromocion(): array
+    {
+        return $this->promocionesVigentes()
+            ->flatMap(fn ($promo) => $promo->productos->pluck('id'))
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /** Turno de caja abierto del usuario actual, si tiene uno. Lookup fresco, sin cachear. */
+    public function arqueoAbierto(): ?ArqueoCaja
+    {
+        return app(ArqueoCajaService::class)->arqueoAbiertoDe(auth()->id(), $this->empresa());
+    }
+
+    public function puedeCobrar(): bool
+    {
+        return $this->arqueoAbierto() !== null
+            && ! empty($this->carrito)
+            && ! $this->faltaCliente()
+            && ! $this->hayLineasConStockInsuficiente()
+            && ! $this->faltaRncComprador()
+            && collect($this->carrito)->every(fn (array $linea) => (float) $linea['cantidad'] > 0);
+    }
+
+    public function abrirCaja(string $fondoInicial): void
+    {
+        try {
+            app(ArqueoCajaService::class)->abrir($fondoInicial, auth()->id(), $this->empresa());
+        } catch (RuntimeException $e) {
+            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+            return;
+        }
+
+        Notification::make()->title('Caja abierta')->success()->send();
+    }
+
+    public function cobrar(): void
+    {
+        if ($this->arqueoAbierto() === null) {
+            Notification::make()->title('Debes abrir la caja antes de cobrar.')->danger()->send();
+
+            return;
+        }
+
+        if (! $this->puedeCobrar()) {
+            $mensaje = $this->mensajeFaltaRncComprador() ?? 'Revisa el carrito antes de cobrar: líneas y stock.';
+
+            Notification::make()->title($mensaje)->danger()->send();
+
+            return;
+        }
+
+        if ($this->montoExcedeMaximo()) {
+            Notification::make()
+                ->title('El monto ingresado excede el máximo permitido (RD$ '.number_format((float) self::MAX_MONTO_PAGO, 2, '.', ',').').')
+                ->danger()
+                ->send();
+
+            return;
+        }
+
+        // Dejar vuelto en fondo o usar saldo requieren un cliente identificado.
+        if (($this->dejarVueltoEnFondo || bccomp($this->usarSaldoFavor, '0.00', 2) > 0) && ! $this->clienteId) {
+            Notification::make()
+                ->title('Selecciona un cliente para usar o dejar saldo a favor.')
+                ->danger()
+                ->send();
+
+            return;
+        }
+
+        // Validar permiso para operaciones de saldo a favor.
+        if (($this->dejarVueltoEnFondo || bccomp($this->usarSaldoFavor, '0.00', 2) > 0)
+            && ! auth()->user()->can('clientes.saldo_favor')) {
+            Notification::make()
+                ->title('No tienes permiso para gestionar saldo a favor.')
+                ->danger()
+                ->send();
+
+            return;
+        }
+
+        // Última barrera antes de registrar: precios, factor y descuentos según el servidor.
+        $this->sanearCarrito();
+
+        if (filled($this->descuentoId) && ! $this->puedeAplicarDescuento()) {
+            $this->descuentoId = '';
+        }
+
+        try {
+            $venta = app(VentaService::class)->registrar([
+                'origen' => static::origenVenta(),
+                'cliente_id' => $this->clienteId,
+                'user_id' => auth()->id(),
+                'tipo_comprobante' => $this->esSinComprobante() ? null : $this->tipoComprobante,
+                'sin_comprobante' => $this->esSinComprobante(),
+                'descuento_id' => filled($this->descuentoId) ? (int) $this->descuentoId : null,
+                'forma_pago' => $this->formaPago,
+                ...$this->datosDesglosePago(),
+                'arqueo_caja_id' => $this->arqueoAbierto()?->id,
+                'tipo_pago' => $this->ventaACredito ? TipoPago::CREDITO->value : TipoPago::CONTADO->value,
+                'fecha_limite_pago' => $this->ventaACredito && filled($this->fechaLimitePago) ? $this->fechaLimitePago : null,
+                'lineas' => $this->lineasParaService(),
+                ...$this->datosAdicionalesVenta(),
+            ], $this->empresa());
+        } catch (ValidationException $e) {
+            throw $e;
+        } catch (\Throwable $e) {
+            // Cobrar es el momento más delicado del cajero: cualquier fallo (de negocio o
+            // inesperado) se muestra como aviso legible en vez de la ventana de error de Livewire.
+            // VentaService corre en una transacción, así que no queda una venta a medias.
+            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+            return;
+        }
+
+        // Si el cajero marcó "dejar vuelto en fondo" y hay vuelto, depositarlo como saldo a favor.
+        // Requiere cliente seleccionado (ya validado en puedeCobrar o antes). La venta ya está
+        // registrada (atómica), el depósito de saldo es un paso separado: si falla, la venta queda
+        // y se notifica al cajero para que lo registre manualmente.
+        if ($this->dejarVueltoEnFondo && $this->clienteId) {
+            $vuelto = $venta->vuelto ?? '0.00';
+
+            if (bccomp((string) $vuelto, '0.00', 2) > 0) {
+                try {
+                    app(SaldoFavorService::class)->depositar(
+                        cliente: Cliente::findOrFail($this->clienteId),
+                        empresa: $this->empresa(),
+                        monto: $vuelto,
+                        venta: $venta,
+                        userId: auth()->id(),
+                    );
+
+                    Notification::make()
+                        ->title('Saldo a favor registrado: RD$ '.number_format((float) $vuelto, 2))
+                        ->success()
+                        ->send();
+                } catch (\Throwable $e) {
+                    Notification::make()
+                        ->title('No se pudo registrar el saldo a favor')
+                        ->body(MensajeError::para($e))
+                        ->warning()
+                        ->send();
+                }
+            }
+        }
+
+        // Si el cliente usó saldo a favor para pagar (parcial o totalmente), consumirlo.
+        if ($this->clienteId && bccomp($this->usarSaldoFavor, '0.00', 2) > 0) {
+            try {
+                app(SaldoFavorService::class)->consumir(
+                    cliente: Cliente::findOrFail($this->clienteId),
+                    empresa: $this->empresa(),
+                    monto: $this->usarSaldoFavor,
+                    venta: $venta,
+                    userId: auth()->id(),
+                );
+            } catch (\Throwable $e) {
+                Notification::make()
+                    ->title('No se pudo descontar el saldo a favor')
+                    ->body(MensajeError::para($e))
+                    ->warning()
+                    ->send();
+            }
+        }
+
+        $this->carrito = [];
+        $this->descuentoId = '';
+        $this->descuentoGlobal = '0.00';
+        $this->busquedaProducto = '';
+        $this->ventaACredito = false;
+        $this->fechaLimitePago = '';
+        $this->montoEfectivo = '';
+        $this->montoTarjeta = '';
+        $this->dejarVueltoEnFondo = false;
+        $this->usarSaldoFavor = '0.00';
+        $this->recalcularTotales();
+
+        $this->notificarVentaRegistradaEImprimirTicket($venta);
+    }
+
+    /**
+     * Punto de extensión para las subclases (p. ej. PuntoDeVentaTouch agrega caja_id): se mezcla
+     * en los datos que cobrar() le pasa a VentaService::registrar().
+     *
+     * @return array<string, mixed>
+     */
+    protected function datosAdicionalesVenta(): array
+    {
+        return [];
+    }
+
+    /**
+     * La venta ya quedó registrada (atómica, vía VentaService) antes de llegar aquí: un fallo de
+     * impresión de aquí en adelante NUNCA la revierte ni la afecta, solo se notifica.
+     *
+     * Cascada del modo de impresión: CajaRegistradora (si tiene override) → Empresa → default
+     * (directa). En modo PREVISUALIZAR se ignora la impresora de red y se abre el ticket en el
+     * navegador; en modo DIRECTA se intenta la red primero y cae al navegador si no hay impresora.
+     */
+    protected function notificarVentaRegistradaEImprimirTicket(Venta $venta): void
+    {
+        $modo = $this->resolverModoImpresion();
+        $impresionService = app(ImpresionService::class);
+
+        // En modo previsualizar: saltar la impresora de red, ir directo al navegador.
+        $impresora = $modo === ModoImpresionPos::PREVISUALIZAR
+            ? null
+            : $impresionService->resolverImpresora(ModuloImpresion::FACTURACION, auth()->user());
+
+        $resultado = $impresionService->imprimirTicket($venta, $impresora);
+
+        $accionComprobante = Action::make('comprobante')
+            ->label('Comprobante PDF')
+            ->url(route('ventas.pdf', $venta), shouldOpenInNewTab: true)
+            ->button();
+
+        if ($resultado['modo'] === 'navegador') {
+            $this->dispatch('abrir-ticket', url: $resultado['url']);
+
+            Notification::make()
+                ->title("Venta {$venta->ncf} registrada")
+                ->body($impresora === null
+                    ? 'No hay impresora configurada para Facturación: se abrió el ticket para imprimir desde el navegador.'
+                    : null)
+                ->success()
+                ->actions([
+                    Action::make('ticket')->label('Imprimir ticket de nuevo')->url($resultado['url'], shouldOpenInNewTab: true)->button(),
+                    $accionComprobante,
+                ])
+                ->send();
+
+            return;
+        }
+
+        if ($resultado['exito']) {
+            Notification::make()
+                ->title("Venta {$venta->ncf} registrada")
+                ->body('Ticket impreso.')
+                ->success()
+                ->actions([$accionComprobante])
+                ->send();
+
+            return;
+        }
+
+        Notification::make()
+            ->title("Venta {$venta->ncf} registrada, pero el ticket no se pudo imprimir")
+            ->body($resultado['error'])
+            ->danger()
+            ->actions([
+                Action::make('ticketNavegador')
+                    ->label('Reintentar por navegador')
+                    ->url($resultado['url'], shouldOpenInNewTab: true)
+                    ->button(),
+                $accionComprobante,
+            ])
+            ->send();
+    }
+
+    /**
+     * Modo de impresión efectivo: CajaRegistradora (si el arqueo está asociado a una) -> Empresa.
+     * Subclases como PuntoDeVentaTouch pueden sobreescribir para leer la caja del cajaId actual.
+     */
+    protected function resolverModoImpresion(): ModoImpresionPos
+    {
+        $caja = $this->arqueoAbierto()?->caja;
+
+        if ($caja !== null && $caja->modo_impresion_pos !== null) {
+            return $caja->modo_impresion_pos;
+        }
+
+        return $this->empresa()->config()->modo_impresion_pos;
+    }
+
+    /**
+     * Calcula el vuelto a entregar al cliente.
+     *
+     * - EFECTIVO puro: vuelto = montoEfectivo − total (si montoEfectivo > total).
+     * - MIXTO: vuelto = (montoEfectivo + montoTarjeta) − total (normalmente 0 o positivo solo
+     *   si el cajero recibe de más en efectivo; la tarjeta cobra exacto).
+     *
+     * Se devuelve '0.00' si no aplica o si los montos no están llenos.
+     */
+    public function vueltoCalculado(): string
+    {
+        $formaPago = FormaPago::tryFrom($this->formaPago);
+
+        if ($formaPago === null || ! $formaPago->incluyeEfectivo()) {
+            return '0.00';
+        }
+
+        $total = $this->totales['total'] ?? '0.00';
+        $efectivo = filled($this->montoEfectivo) ? $this->montoEfectivo : '0.00';
+
+        if ($formaPago === FormaPago::MIXTO) {
+            $tarjeta = filled($this->montoTarjeta) ? $this->montoTarjeta : '0.00';
+            $totalRecibido = bcadd($efectivo, $tarjeta, 2);
+        } else {
+            $totalRecibido = $efectivo;
+        }
+
+        $vuelto = bcsub($totalRecibido, $total, 2);
+
+        return bccomp($vuelto, '0.00', 2) > 0 ? $vuelto : '0.00';
+    }
+
+    /** Verifica si alguno de los montos de pago excede el límite de la columna decimal(14,2). */
+    protected function montoExcedeMaximo(): bool
+    {
+        $max = self::MAX_MONTO_PAGO;
+
+        if (filled($this->montoEfectivo) && bccomp($this->montoEfectivo, $max, 2) > 0) {
+            return true;
+        }
+
+        if (filled($this->montoTarjeta) && bccomp($this->montoTarjeta, $max, 2) > 0) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * Arma los datos de desglose de pago (montos por método y vuelto) que cobrar() mezcla en el
+     * array que va a VentaService::registrar(). Los campos se llenan solo cuando tienen sentido
+     * (para no guardar nulls/ceros innecesarios en pagos sencillos).
+     *
+     * @return array<string, string|null>
+     */
+    protected function datosDesglosePago(): array
+    {
+        $formaPago = FormaPago::tryFrom($this->formaPago);
+        $total = $this->totales['total'] ?? '0.00';
+
+        if ($formaPago === FormaPago::MIXTO) {
+            $efectivo = filled($this->montoEfectivo) ? $this->montoEfectivo : '0.00';
+            $tarjeta = filled($this->montoTarjeta) ? $this->montoTarjeta : '0.00';
+            $vuelto = $this->vueltoCalculado();
+
+            return [
+                'monto_efectivo' => $efectivo,
+                'monto_tarjeta' => $tarjeta,
+                'vuelto' => bccomp($vuelto, '0.00', 2) > 0 ? $vuelto : null,
+            ];
+        }
+
+        if ($formaPago === FormaPago::EFECTIVO && filled($this->montoEfectivo)) {
+            $vuelto = $this->vueltoCalculado();
+
+            return [
+                'monto_efectivo' => $this->montoEfectivo,
+                'vuelto' => bccomp($vuelto, '0.00', 2) > 0 ? $vuelto : null,
+            ];
+        }
+
+        if ($formaPago === FormaPago::TARJETA) {
+            return ['monto_tarjeta' => $total];
+        }
+
+        if ($formaPago === FormaPago::TRANSFERENCIA) {
+            return ['monto_transferencia' => $total];
+        }
+
+        return [];
+    }
+
+    /** Desde qué pantalla se cobra (el POS táctil lo sobrescribe). */
+    protected static function origenVenta(): OrigenVenta
+    {
+        return OrigenVenta::POS;
+    }
+
+    /** El permiso se exige en el servidor: ocultar el campo en pantalla no impide enviarlo. */
+    public function puedeAplicarDescuento(): bool
+    {
+        return (bool) auth()->user()?->can('ventas.aplicar_descuento');
+    }
+
+    /**
+     * Repone en el carrito lo que NO le corresponde decidir al navegador. El carrito es una
+     * propiedad pública de Livewire, así que desde el navegador se puede reescribir cualquier
+     * campo: aquí precio y factor se vuelven a leer del producto/presentación (un producto de
+     * RD$500 no se puede cobrar a RD$1), y el descuento por línea se anula si el usuario no tiene
+     * `ventas.aplicar_descuento`. Corre antes de cada cálculo de totales y antes de cobrar.
+     */
+    protected function sanearCarrito(): void
+    {
+        if (empty($this->carrito)) {
+            return;
+        }
+
+        $productos = Producto::query()
+            ->where('empresa_id', $this->empresaId())
+            ->whereIn('id', array_filter(array_column($this->carrito, 'producto_id')))
+            ->get()
+            ->keyBy('id');
+
+        $idsPresentacion = array_filter(array_column($this->carrito, 'presentacion_id'));
+        $presentaciones = $idsPresentacion === []
+            ? collect()
+            : ProductoPresentacion::query()
+                ->where('empresa_id', $this->empresaId())
+                ->whereIn('id', $idsPresentacion)
+                ->get()
+                ->keyBy('id');
+
+        $puedeDescontar = $this->puedeAplicarDescuento();
+        $preciosLista = $this->preciosDeListaDelCliente(array_keys($productos->all()));
+
+        foreach ($this->carrito as $indice => $linea) {
+            if (! $puedeDescontar) {
+                $this->carrito[$indice]['descuento'] = '0.00';
+            }
+
+            $producto = $productos->get($linea['producto_id'] ?? null);
+
+            // Producto inexistente o de otra empresa: VentaService lo rechaza con su mensaje.
+            if ($producto === null) {
+                continue;
+            }
+
+            $presentacion = $presentaciones->get($linea['presentacion_id'] ?? null);
+
+            if ($presentacion !== null && $presentacion->producto_id !== $producto->id) {
+                $presentacion = null;
+            }
+
+            $esPesado = ($linea['tipo_venta'] ?? null) === TipoVenta::PESADO->value;
+
+            // Lista de precio del cliente: aplica al producto en su unidad base (sin presentación
+            // o con la presentación base). Una caja o un producto por peso tienen su propio precio.
+            $aplicaLista = ! $esPesado
+                && ($presentacion === null || $presentacion->es_base)
+                && isset($preciosLista[$producto->id]);
+
+            $this->carrito[$indice]['precio_unitario'] = match (true) {
+                $aplicaLista => (string) $preciosLista[$producto->id],
+                $esPesado => (string) ($producto->precio_por_peso ?? 0),
+                default => (string) ($presentacion?->precio ?? $producto->precio),
+            };
+            $this->carrito[$indice]['factor'] = $esPesado ? '1' : (string) ($presentacion?->factor ?? 1);
+        }
+    }
+
+    /**
+     * Precios de la lista asignada al cliente seleccionado, por producto_id. Vacío si no hay
+     * cliente, no tiene lista, la lista está inactiva o es de otra empresa.
+     *
+     * @param  array<int>  $productoIds
+     * @return array<int, string>
+     */
+    protected function preciosDeListaDelCliente(array $productoIds): array
+    {
+        $lista = $this->clienteSeleccionado()?->listaPrecio;
+
+        if ($lista === null || ! $lista->activa || $lista->empresa_id !== $this->empresaId() || $productoIds === []) {
+            return [];
+        }
+
+        return $lista->productos()
+            ->whereIn('productos.id', $productoIds)
+            ->get()
+            ->mapWithKeys(fn (Producto $producto) => [$producto->id => (string) $producto->pivot->precio])
+            ->all();
+    }
+
+    /** Nombre de la lista de precio que se está aplicando, para mostrarlo al cajero. */
+    public function listaPrecioAplicada(): ?string
+    {
+        $lista = $this->clienteSeleccionado()?->listaPrecio;
+
+        return $lista !== null && $lista->activa && $lista->empresa_id === $this->empresaId() ? $lista->nombre : null;
+    }
+
+    protected function recalcularTotales(): void
+    {
+        if (empty($this->carrito)) {
+            $this->totales = $this->totalesVacios();
+            $this->descuentoGlobal = '0.00';
+
+            return;
+        }
+
+        $this->sanearCarrito();
+
+        try {
+            $lineas = $this->lineasParaService();
+
+            // El servicio resuelve el descuento internamente a partir del descuento_id:
+            // valida que pertenezca a la empresa, que esté activo, y calcula el monto.
+            $this->totales = app(VentaService::class)->previsualizar([
+                'descuento_id' => filled($this->descuentoId) ? (int) $this->descuentoId : null,
+                'lineas' => $lineas,
+            ], $this->empresa());
+            $this->descuentoGlobal = $this->totales['descuento'];
+        } catch (VentaInvalidaException) {
+            $this->totales = $this->totalesVacios();
+            $this->descuentoGlobal = '0.00';
+        }
+    }
+
+    /** @return array<string, string> */
+    protected function totalesVacios(): array
+    {
+        return [
+            'subtotal' => '0.00',
+            'descuento' => '0.00',
+            'monto_gravado_18' => '0.00',
+            'monto_gravado_16' => '0.00',
+            'monto_gravado_0' => '0.00',
+            'itbis_18' => '0.00',
+            'itbis_16' => '0.00',
+            'total_itbis' => '0.00',
+            'total' => '0.00',
+        ];
+    }
+
+    /** @return array<int, array<string, mixed>> */
+    protected function lineasParaService(): array
+    {
+        return collect($this->carrito)->map(fn (array $linea) => [
+            'producto_id' => $linea['producto_id'],
+            'presentacion_id' => $linea['presentacion_id'] ?? null,
+            'cantidad' => (float) $linea['cantidad'],
+            'precio_unitario' => $linea['precio_unitario'],
+            'descuento' => $linea['descuento'],
+            'factor' => (float) ($linea['factor'] ?? 1),
+        ])->all();
+    }
+}

@@ -1,0 +1,825 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Enums\EstadoCompra;
+use App\Enums\EstadoVenta;
+use App\Enums\FormaPago;
+use App\Enums\OrigenMovimiento;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoDocumentoCliente;
+use App\Enums\TipoMovimiento;
+use App\Enums\TipoPago;
+use App\Models\ArqueoCaja;
+use App\Models\Compra;
+use App\Models\CuentaPorCobrar;
+use App\Models\CuentaPorPagar;
+use App\Models\MovimientoInventario;
+use App\Models\Producto;
+use App\Models\Venta;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+
+/**
+ * Agregaciones para el dashboard y los reportes de gestión. Todos los métodos que miden
+ * ingresos excluyen ventas con estado ANULADA: una anulación revierte el efecto fiscal y
+ * contable de la venta, así que no debe contar como ingreso.
+ */
+class ReporteService
+{
+    /**
+     * Código DGII de "Tipo de Ingreso" para el 607 (01 = Ingresos por operaciones, no
+     * financieros). Este ERP no distingue tipos de ingreso (financieros, extraordinarios,
+     * arrendamientos, etc.): todas las ventas son ingresos operacionales, así que se fija
+     * en 01 para todas las filas. Centralizado aquí para ajustarlo fácilmente si en el
+     * futuro se necesita derivarlo de otra fuente (p. ej. una configuración).
+     */
+    public const TIPO_INGRESO_DEFECTO = '01';
+
+    /**
+     * Base de los agregados de ingresos: ventas no anuladas, sin las Notas de Crédito de
+     * anulación (venta_modificada_id) — la venta que anulan ya queda fuera por ANULADA, así que
+     * contar la nota restaría (o sumaría) dos veces.
+     */
+    protected function ventasEmitidasEnRango(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Venta::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('estado', '!=', EstadoVenta::ANULADA)
+            ->whereNull('venta_modificada_id')
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('ventas.empresa_id', $id));
+    }
+
+    /**
+     * Todas las ventas del rango (incluye ANULADAs) para el listado del reporte de ventas:
+     * a diferencia de los agregados de ingresos, aquí interesa la trazabilidad completa.
+     *
+     * $empresaId: todos los consumidores (widgets, controllers, PDF) deben pasarlo explícitamente
+     * para no depender del scoping automático de Filament (falla en colas, tests, comandos).
+     */
+    public function ventasEnRangoQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Venta::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('ventas.empresa_id', $id));
+    }
+
+    /**
+     * Base del Formato 607 (Envío de Ventas de Bienes y Servicios) de la DGII: un e-NCF por
+     * fila. Regla fiscal (confirmada en la Norma General 07-18 y en la comunidad de ayuda de
+     * la DGII): las ventas ANULADAS NO se reportan en el 607 —se excluyen por completo, no
+     * solo de los montos— porque un NCF anulado se declara aparte, en el Formato 608 (Ventas
+     * Anuladas), junto con el motivo de anulación. Reportarlo también en el 607 duplicaría
+     * la operación ante la DGII. Solo se incluyen comprobantes con e-NCF asignado, ya que el
+     * 607 es un reporte de comprobantes fiscales emitidos.
+     *
+     * Excepción: un e-CF que la DGII ya aceptó y se anuló con Nota de Crédito (e-CF 34) SÍ va
+     * al 607 aunque esté ANULADA — para la DGII sigue siendo válido; la Nota de Crédito (que
+     * también va, con su NCF modificado) es la que lo contrarresta. Solo lo que nunca llegó a
+     * ser válido (físicos, e-CF rechazados) es "anulado" en el sentido del 608.
+     */
+    public function reporte607Query(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Venta::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where(fn (Builder $query) => $query
+                ->where('estado', '!=', EstadoVenta::ANULADA)
+                ->orWhereHas('notasCredito'))
+            ->whereNotNull('ncf')
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id))
+            ->with('cliente');
+    }
+
+    /**
+     * Una fila por e-NCF emitido en el rango, con el mapeo de columnas del 607.
+     *
+     * Notas de mapeo (verificadas contra el instructivo oficial de la DGII y su comunidad de
+     * ayuda, no solo inferidas):
+     * - tipo_identificacion: 1=RNC, 2=Cédula (códigos oficiales del 607). El código oficial 3
+     *   es "Pasaporte", que este sistema no captura; para clientes sin documento (consumo por
+     *   debajo del umbral de RD$250,000, donde la DGII indica NO solicitar identificación) se
+     *   deja en null —el campo va en blanco en el 607 real, no con un código inventado—.
+     * - monto_facturado: es la base ANTES de ITBIS y DESPUÉS del descuento (Venta::subtotalNeto()),
+     *   no el total. La DGII
+     *   documenta "Monto Facturado" como el subtotal sin impuestos; el ITBIS va aparte en
+     *   itbis_facturado.
+     *
+     * @return Collection<int, array{
+     *   rnc_cedula: ?string,
+     *   tipo_identificacion: ?int,
+     *   numero_comprobante: string,
+     *   numero_comprobante_modificado: ?string,
+     *   tipo_ingreso: string,
+     *   fecha_comprobante: Carbon,
+     *   monto_facturado: string,
+     *   itbis_facturado: string,
+     *   monto_total: string,
+     * }>
+     */
+    public function reporte607(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->reporte607Query($desde, $hasta, $empresaId)
+            ->orderBy('fecha')
+            ->get()
+            ->map(fn (Venta $venta) => [
+                'rnc_cedula' => $this->rncCedula607($venta->cliente?->tipo_documento, $venta->cliente?->documento),
+                'tipo_identificacion' => $this->tipoIdentificacion607($venta->cliente?->tipo_documento),
+                'numero_comprobante' => $venta->ncf,
+                'numero_comprobante_modificado' => $venta->ncf_modifica,
+                'tipo_ingreso' => self::TIPO_INGRESO_DEFECTO,
+                'fecha_comprobante' => $venta->fecha,
+                'monto_facturado' => $venta->subtotalNeto(),
+                'itbis_facturado' => (string) $venta->total_itbis,
+                'monto_total' => (string) $venta->total,
+            ]);
+    }
+
+    /**
+     * Genera el contenido TXT del formato 607 según Norma General 07-2018 de la DGII.
+     *
+     * Layout: pipe-separated, 23 columnas por fila.
+     * Cabecera: 607|RNC_EMPRESA|AAAAMM|CANTIDAD_REGISTROS
+     *
+     * Columnas detalle:
+     *  1  RNC/Cédula comprador         8  Monto facturado (sin ITBIS)    15 Otros impuestos/tasas
+     *  2  Tipo identificación          9  ITBIS facturado                16 Monto propina legal
+     *  3  NCF                         10  ITBIS retenido por terceros    17 Efectivo (con impuestos)
+     *  4  NCF modificado              11  ITBIS percibido                18 Cheque/Transf/Depósito
+     *  5  Tipo de ingreso             12  Retención renta por terceros   19 Tarjeta déb/créd
+     *  6  Fecha comprobante (AAAAMMDD)13  ISR percibido                  20 Venta a crédito
+     *  7  Fecha retención (AAAAMMDD)  14  Impuesto selectivo al consumo  21 Bonos/certificados regalo
+     *                                                                    22 Permuta
+     *                                                                    23 Otras formas de ventas
+     *
+     * Columnas 17-23: formas de pago INCLUYENDO impuestos; su suma = total factura.
+     *
+     * Nombre de archivo sugerido: DGII_F_607_{RNC}_{AAAAMM}.TXT
+     */
+    public function reporte607Txt(Carbon $desde, Carbon $hasta, int $empresaId, string $rncEmpresa): string
+    {
+        $periodo = $desde->format('Ym');
+
+        $ventas = $this->reporte607Query($desde, $hasta, $empresaId)
+            ->orderBy('fecha')
+            ->get();
+
+        $lineas = [];
+
+        foreach ($ventas as $venta) {
+            /** @var Venta $venta */
+            $rncCedula = $this->rncCedula607($venta->cliente?->tipo_documento, $venta->cliente?->documento);
+            $tipoId = $this->tipoIdentificacion607($venta->cliente?->tipo_documento);
+
+            // Formas de pago (cols 17-23): el monto incluye impuestos → va el total.
+            // Si es crédito, todo va a la columna 20.
+            $efectivo = '0.00';
+            $transferencia = '0.00';
+            $tarjeta = '0.00';
+            $credito = '0.00';
+
+            if ($venta->tipo_pago === TipoPago::CREDITO) {
+                $credito = number_format((float) $venta->total, 2, '.', '');
+            } else {
+                switch ($venta->forma_pago) {
+                    case FormaPago::EFECTIVO:
+                        // En efectivo puro se usa el total (ya descontado el vuelto).
+                        $efectivo = number_format((float) $venta->total, 2, '.', '');
+                        break;
+                    case FormaPago::TARJETA:
+                        $tarjeta = number_format((float) $venta->total, 2, '.', '');
+                        break;
+                    case FormaPago::TRANSFERENCIA:
+                        $transferencia = number_format((float) $venta->total, 2, '.', '');
+                        break;
+                    case FormaPago::MIXTO:
+                        // En MIXTO: monto_efectivo puede incluir exceso (vuelto). La DGII
+                        // exige que cols 17-23 sumen exactamente al total, así que restamos
+                        // el vuelto del efectivo reportado.
+                        $vuelto = (float) ($venta->vuelto ?? 0);
+                        $efectivo = number_format((float) ($venta->monto_efectivo ?? 0) - $vuelto, 2, '.', '');
+                        $tarjeta = number_format((float) ($venta->monto_tarjeta ?? 0), 2, '.', '');
+                        break;
+                    default:
+                        // Fallback: todo a efectivo.
+                        $efectivo = number_format((float) $venta->total, 2, '.', '');
+                }
+            }
+
+            $campos = [
+                $rncCedula ?? '',                                                    // 1  RNC/Cédula
+                $tipoId !== null ? (string) $tipoId : '',                            // 2  Tipo Identificación
+                $venta->ncf,                                                         // 3  NCF
+                $venta->ncf_modifica ?? '',                                           // 4  NCF Modificado
+                self::TIPO_INGRESO_DEFECTO,                                          // 5  Tipo de Ingreso
+                $venta->fecha->format('Ymd'),                                        // 6  Fecha Comprobante
+                '',                                                                  // 7  Fecha Retención
+                number_format((float) $venta->subtotalNeto(), 2, '.', ''),           // 8  Monto Facturado
+                number_format((float) $venta->total_itbis, 2, '.', ''),              // 9  ITBIS Facturado
+                '',                                                                  // 10 ITBIS Retenido por Terceros
+                '',                                                                  // 11 ITBIS Percibido
+                '',                                                                  // 12 Retención Renta por Terceros
+                '',                                                                  // 13 ISR Percibido
+                '',                                                                  // 14 Impuesto Selectivo al Consumo
+                '',                                                                  // 15 Otros Impuestos/Tasas
+                '',                                                                  // 16 Monto Propina Legal
+                $efectivo,                                                           // 17 Efectivo
+                $transferencia,                                                      // 18 Cheque/Transferencia/Depósito
+                $tarjeta,                                                            // 19 Tarjeta Débito/Crédito
+                $credito,                                                            // 20 Venta a Crédito
+                '',                                                                  // 21 Bonos o Certificados de Regalo
+                '',                                                                  // 22 Permuta
+                '',                                                                  // 23 Otras Formas de Ventas
+            ];
+
+            $lineas[] = implode('|', $campos);
+        }
+
+        // Cabecera: 607|RNC_EMPRESA|PERIODO|CANTIDAD
+        $cabecera = implode('|', ['607', $rncEmpresa, $periodo, (string) count($lineas)]);
+
+        return $cabecera."\n".implode("\n", $lineas);
+    }
+
+    /**
+     * RNC/Cédula del comprador para el 607, según el tipo de documento del cliente. Único
+     * punto donde vive esta regla —usado tanto por reporte607() como por la página y los
+     * exportadores del 607— para que el mapeo no se desalinee entre pantalla y archivo.
+     */
+    public function rncCedula607(?TipoDocumentoCliente $tipoDocumento, ?string $documento): ?string
+    {
+        // Null = venta al portador: igual que un cliente sin documento, el campo va en blanco.
+        return match ($tipoDocumento) {
+            null => null,
+            TipoDocumentoCliente::RNC, TipoDocumentoCliente::CEDULA => $documento,
+            TipoDocumentoCliente::SIN_DOCUMENTO => null,
+        };
+    }
+
+    /**
+     * Código DGII de "Tipo de Identificación" para el 607: 1=RNC, 2=Cédula. Ver la nota en
+     * reporte607() sobre por qué "sin documento" es null y no un código 3 inventado.
+     */
+    public function tipoIdentificacion607(?TipoDocumentoCliente $tipoDocumento): ?int
+    {
+        return match ($tipoDocumento) {
+            null => null,
+            TipoDocumentoCliente::RNC => 1,
+            TipoDocumentoCliente::CEDULA => 2,
+            TipoDocumentoCliente::SIN_DOCUMENTO => null,
+        };
+    }
+
+    /**
+     * Etiqueta legible del código de tipo_identificacion607(), para pantalla/PDF/exportables.
+     */
+    public function etiquetaTipoIdentificacion607(?int $codigo): string
+    {
+        return match ($codigo) {
+            1 => 'RNC',
+            2 => 'Cédula',
+            default => '—',
+        };
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Formato 606 — Envío de Compras de Bienes y Servicios
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Catálogo DGII de "Tipo de bienes y servicios" para el 606.
+     */
+    public const TIPO_BIENES_SERVICIOS_606 = [
+        '01' => 'Gastos de personal',
+        '02' => 'Gastos por trabajos, suministros y servicios',
+        '03' => 'Arrendamientos',
+        '04' => 'Gastos de activos fijos',
+        '05' => 'Gastos de representación',
+        '06' => 'Otras deducciones admitidas',
+        '07' => 'Gastos financieros',
+        '08' => 'Gastos extraordinarios',
+        '09' => 'Compras y gastos que formarán parte del costo de venta',
+        '10' => 'Adquisiciones de activos',
+        '11' => 'Gastos de seguros',
+    ];
+
+    /**
+     * Catálogo DGII de "Forma de pago" para el 606 (y 608).
+     */
+    public const FORMA_PAGO_606 = [
+        '01' => 'Efectivo',
+        '02' => 'Cheque / Transferencia / Depósito',
+        '03' => 'Tarjeta de crédito / débito',
+        '04' => 'Compra a crédito',
+        '05' => 'Permuta',
+        '06' => 'Nota de crédito',
+        '07' => 'Mixto',
+    ];
+
+    /**
+     * Query base del 606: compras no anuladas con NCF de proveedor en el rango.
+     * Solo compras con NCF entran al 606 — las informales (sin NCF) se excluyen.
+     */
+    public function reporte606Query(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Compra::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('estado', '!=', EstadoCompra::ANULADA)
+            ->whereNotNull('ncf')
+            ->where('ncf', '!=', '')
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id))
+            ->with('proveedor');
+    }
+
+    /**
+     * Una fila por compra con NCF en el rango, con el mapeo de columnas del 606.
+     *
+     * @return Collection<int, array{
+     *   rnc_cedula: ?string,
+     *   tipo_identificacion: ?int,
+     *   tipo_bienes_servicios: string,
+     *   ncf: string,
+     *   ncf_modificado: string,
+     *   fecha_comprobante: Carbon,
+     *   fecha_pago: ?string,
+     *   monto_servicios: string,
+     *   monto_bienes: string,
+     *   total_facturado: string,
+     *   itbis_retenido: string,
+     *   itbis_facturado: string,
+     *   forma_pago: string,
+     * }>
+     */
+    public function reporte606(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->reporte606Query($desde, $hasta, $empresaId)
+            ->orderBy('fecha')
+            ->get()
+            ->map(fn (Compra $compra) => [
+                'rnc_cedula' => $compra->proveedor?->rnc,
+                'tipo_identificacion' => $this->tipoIdentificacion606($compra->proveedor?->rnc),
+                'tipo_bienes_servicios' => $compra->tipo_bienes_servicios_606 ?? '09',
+                'ncf' => $compra->ncf,
+                'ncf_modificado' => '',
+                'fecha_comprobante' => $compra->fecha,
+                'fecha_pago' => $compra->fecha_pago?->format('Ymd'),
+                'monto_servicios' => '0.00',
+                'monto_bienes' => number_format((float) $compra->subtotal, 2, '.', ''),
+                'total_facturado' => number_format((float) $compra->total, 2, '.', ''),
+                'itbis_retenido' => number_format((float) ($compra->retencion_itbis ?? 0), 2, '.', ''),
+                'itbis_facturado' => number_format((float) $compra->itbis, 2, '.', ''),
+                'itbis_proporcionalidad' => '0.00',
+                'itbis_costo' => '0.00',
+                'itbis_adelantado' => '0.00',
+                'itbis_percibido' => '0.00',
+                'tipo_retencion_isr' => $compra->tipo_retencion_isr ?? '',
+                'monto_retencion_renta' => number_format((float) ($compra->retencion_isr ?? 0), 2, '.', ''),
+                'isr_percibido' => '0.00',
+                'impuesto_selectivo' => '0.00',
+                'otros_impuestos' => '0.00',
+                'monto_propina' => '0.00',
+                'forma_pago' => $compra->forma_pago_606 ?? '01',
+            ]);
+    }
+
+    /**
+     * Tipo de identificación del proveedor para el 606: 1=RNC (9 dígitos), 2=Cédula (11 dígitos).
+     */
+    public function tipoIdentificacion606(?string $rnc): ?int
+    {
+        if ($rnc === null || $rnc === '') {
+            return null;
+        }
+
+        $limpio = preg_replace('/\D/', '', $rnc);
+
+        return strlen($limpio) === 9 ? 1 : 2;
+    }
+
+    /**
+     * Etiqueta legible del tipo de identificación del proveedor.
+     */
+    public function etiquetaTipoIdentificacion606(?int $codigo): string
+    {
+        return match ($codigo) {
+            1 => 'RNC',
+            2 => 'Cédula',
+            default => '—',
+        };
+    }
+
+    /**
+     * Generar el TXT del 606 en formato DGII (pipe-delimited).
+     */
+    public function exportar606Txt(string $rncEmpresa, Carbon $desde, Carbon $hasta, ?int $empresaId = null): string
+    {
+        $registros = $this->reporte606($desde, $hasta, $empresaId);
+        $periodo = $desde->format('Ym');
+
+        $lineas = [];
+
+        // Encabezado
+        $lineas[] = implode('|', ['606', $rncEmpresa, $periodo, (string) $registros->count()]);
+
+        // Registros
+        foreach ($registros as $reg) {
+            $lineas[] = implode('|', [
+                $reg['rnc_cedula'] ?? '',
+                (string) ($reg['tipo_identificacion'] ?? ''),
+                $reg['tipo_bienes_servicios'],
+                $reg['ncf'],
+                $reg['ncf_modificado'],
+                $reg['fecha_comprobante']->format('Ymd'),
+                $reg['fecha_pago'] ?? '',
+                $reg['monto_servicios'],
+                $reg['monto_bienes'],
+                $reg['total_facturado'],
+                $reg['itbis_retenido'],
+                $reg['itbis_facturado'],
+                $reg['itbis_proporcionalidad'],
+                $reg['itbis_costo'],
+                $reg['itbis_adelantado'],
+                $reg['itbis_percibido'],
+                $reg['tipo_retencion_isr'],
+                $reg['monto_retencion_renta'],
+                $reg['isr_percibido'],
+                $reg['impuesto_selectivo'],
+                $reg['otros_impuestos'],
+                $reg['monto_propina'],
+                $reg['forma_pago'],
+            ]);
+        }
+
+        return implode("\n", $lineas);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Formato 608 — Comprobantes Fiscales Anulados
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Catálogo DGII de "Tipo de anulación" para el 608.
+     */
+    public const TIPO_ANULACION_608 = [
+        '01' => 'Deterioro de factura pre-impresa',
+        '02' => 'Errores de impresión (factura pre-impresa)',
+        '03' => 'Impresión defectuosa',
+        '04' => 'Corrección de la información',
+        '05' => 'Cambio de productos',
+        '06' => 'Devolución de productos',
+        '07' => 'Omisión de productos',
+        '08' => 'Errores en secuencia de NCF',
+        '09' => 'Por cese de operaciones',
+        '10' => 'Pérdida o hurto de talonarios',
+    ];
+
+    /**
+     * Query base del 608: ventas ANULADAS con comprobante FÍSICO (tipo B) y NCF, en el rango
+     * por fecha de anulación (anulada_en), no por fecha de emisión.
+     *
+     * Los e-CF anulados NO van al 608: su anulación se reporta vía Nota de Crédito E34
+     * directamente ante la DGII.
+     */
+    public function reporte608Query(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        $tiposFisicos = collect(TipoComprobante::cases())
+            ->filter->esFisico()
+            ->map->value
+            ->all();
+
+        return Venta::query()
+            ->whereBetween('anulada_en', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('estado', EstadoVenta::ANULADA)
+            ->whereNotNull('ncf')
+            ->where('ncf', '!=', '')
+            ->whereIn('tipo_comprobante', $tiposFisicos)
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id));
+    }
+
+    /**
+     * Una fila por comprobante físico anulado en el rango, con las 3 columnas del 608.
+     *
+     * @return Collection<int, array{ncf: string, tipo_anulacion: string, fecha_anulacion: string}>
+     */
+    public function reporte608(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->reporte608Query($desde, $hasta, $empresaId)
+            ->orderBy('anulada_en')
+            ->get()
+            ->map(fn (Venta $venta) => [
+                'ncf' => $venta->ncf,
+                'tipo_anulacion' => $venta->tipo_anulacion_608 ?? '04',
+                'fecha_anulacion' => $venta->anulada_en->format('Ymd'),
+            ]);
+    }
+
+    /**
+     * Generar el TXT del 608 en formato DGII (pipe-delimited).
+     */
+    public function exportar608Txt(string $rncEmpresa, Carbon $desde, Carbon $hasta, ?int $empresaId = null): string
+    {
+        $registros = $this->reporte608($desde, $hasta, $empresaId);
+        $periodo = $desde->format('Ym');
+
+        $lineas = [];
+
+        // Encabezado
+        $lineas[] = implode('|', ['608', $rncEmpresa, $periodo, (string) $registros->count()]);
+
+        // Registros
+        foreach ($registros as $reg) {
+            $lineas[] = implode('|', [
+                $reg['ncf'],
+                $reg['tipo_anulacion'],
+                $reg['fecha_anulacion'],
+            ]);
+        }
+
+        return implode("\n", $lineas);
+    }
+
+    /**
+     * @return array{total_vendido: string, total_itbis: string, cantidad_ventas: int, ticket_promedio: string}
+     */
+    public function ventasPorRango(Carbon $desde, Carbon $hasta, ?int $empresaId = null): array
+    {
+        $fila = $this->ventasEmitidasEnRango($desde, $hasta, $empresaId)
+            ->selectRaw('COALESCE(SUM(total), 0) as total_vendido')
+            ->selectRaw('COALESCE(SUM(total_itbis), 0) as total_itbis')
+            ->selectRaw('COUNT(*) as cantidad_ventas')
+            ->first();
+
+        $totalVendido = (string) $fila->total_vendido;
+        $cantidadVentas = (int) $fila->cantidad_ventas;
+
+        return [
+            'total_vendido' => $totalVendido,
+            'total_itbis' => (string) $fila->total_itbis,
+            'cantidad_ventas' => $cantidadVentas,
+            'ticket_promedio' => $cantidadVentas > 0
+                ? bcdiv($totalVendido, (string) $cantidadVentas, 2)
+                : '0.00',
+        ];
+    }
+
+    /**
+     * Desglose de comprobantes emitidos en el rango: cuántos son electrónicos (e-CF, pasaron
+     * por el PAC) vs. físicos (tipo B, nunca se transmiten). Para el widget del dashboard.
+     *
+     * @return array{electronicos: int, fisicos: int}
+     */
+    public function desgloseComprobantes(Carbon $desde, Carbon $hasta, ?int $empresaId = null): array
+    {
+        $tiposElectronicos = collect(TipoComprobante::cases())->filter->esElectronico()->map->value->all();
+        $tiposFisicos = collect(TipoComprobante::cases())->filter->esFisico()->map->value->all();
+
+        $base = $this->ventasEmitidasEnRango($desde, $hasta, $empresaId)->whereNotNull('ncf');
+
+        return [
+            'electronicos' => (clone $base)->whereIn('tipo_comprobante', $tiposElectronicos)->count(),
+            'fisicos' => (clone $base)->whereIn('tipo_comprobante', $tiposFisicos)->count(),
+        ];
+    }
+
+    /**
+     * Serie para gráfico: fecha (Y-m-d) => total vendido ese día.
+     *
+     * @return Collection<string, string>
+     */
+    public function ventasPorDia(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->ventasEmitidasEnRango($desde, $hasta, $empresaId)
+            ->selectRaw('DATE(fecha) as dia')
+            ->selectRaw('COALESCE(SUM(total), 0) as total')
+            ->groupBy('dia')
+            ->orderBy('dia')
+            ->get()
+            ->mapWithKeys(fn ($fila) => [(string) $fila->dia => (string) $fila->total]);
+    }
+
+    public function productosVendidosQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Producto::query()
+            ->join('detalle_ventas', 'detalle_ventas.producto_id', '=', 'productos.id')
+            ->join('ventas', 'ventas.id', '=', 'detalle_ventas.venta_id')
+            ->whereBetween('ventas.fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('ventas.estado', '!=', EstadoVenta::ANULADA)
+            ->whereNull('ventas.venta_modificada_id')
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('ventas.empresa_id', $id))
+            ->groupBy('productos.id', 'productos.codigo', 'productos.nombre')
+            ->selectRaw('productos.id, productos.codigo, productos.nombre')
+            ->selectRaw('COALESCE(SUM(detalle_ventas.cantidad), 0) as cantidad_vendida')
+            ->selectRaw('COALESCE(SUM(detalle_ventas.subtotal), 0) as ingresos');
+    }
+
+    /**
+     * @return array{por_cantidad: Collection, por_ingresos: Collection}
+     */
+    public function topProductos(Carbon $desde, Carbon $hasta, int $limite = 10, ?int $empresaId = null): array
+    {
+        $base = $this->productosVendidosQuery($desde, $hasta, $empresaId);
+
+        return [
+            'por_cantidad' => (clone $base)->orderByDesc('cantidad_vendida')->limit($limite)->get(),
+            'por_ingresos' => (clone $base)->orderByDesc('ingresos')->limit($limite)->get(),
+        ];
+    }
+
+    public function ventasPorClienteQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return $this->ventasEmitidasEnRango($desde, $hasta, $empresaId)
+            // leftJoin: las ventas al portador (cliente_id null) se agrupan en una sola fila.
+            ->leftJoin('clientes', 'clientes.id', '=', 'ventas.cliente_id')
+            ->groupBy('clientes.id', 'clientes.nombre')
+            // "id" además de "cliente_id": el modelo base de la consulta sigue siendo Venta,
+            // y Filament identifica cada fila de tabla con getKey() (columna "id"); la fila al
+            // portador usa 0 porque no tiene cliente.
+            ->selectRaw('COALESCE(clientes.id, 0) as id, clientes.id as cliente_id')
+            ->selectRaw('COALESCE(clientes.nombre, ?) as cliente_nombre', [Venta::ETIQUETA_AL_PORTADOR])
+            ->selectRaw('COALESCE(SUM(ventas.total), 0) as total_vendido')
+            ->selectRaw('COUNT(*) as cantidad_ventas');
+    }
+
+    public function ventasPorCliente(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->ventasPorClienteQuery($desde, $hasta, $empresaId)->orderByDesc('total_vendido')->get();
+    }
+
+    public function ventasPorUsuarioQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return $this->ventasEmitidasEnRango($desde, $hasta, $empresaId)
+            ->join('users', 'users.id', '=', 'ventas.user_id')
+            ->groupBy('users.id', 'users.name')
+            ->selectRaw('users.id as id, users.id as user_id, users.name as user_nombre')
+            ->selectRaw('COALESCE(SUM(ventas.total), 0) as total_vendido')
+            ->selectRaw('COUNT(*) as cantidad_ventas');
+    }
+
+    public function ventasPorUsuario(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return $this->ventasPorUsuarioQuery($desde, $hasta, $empresaId)->orderByDesc('total_vendido')->get();
+    }
+
+    /**
+     * Conteo por estado_fiscal, separado también por estado (emitida/anulada): incluye
+     * anuladas porque el propósito aquí es monitoreo del ciclo fiscal DGII, no ingresos.
+     */
+    public function ventasPorEstadoFiscal(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Collection
+    {
+        return Venta::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id))
+            ->groupBy('estado', 'estado_fiscal')
+            ->selectRaw('estado, estado_fiscal, COUNT(*) as cantidad')
+            ->orderBy('estado_fiscal')
+            ->get()
+            ->map(fn ($fila) => [
+                'estado' => $fila->estado,
+                'estado_fiscal' => $fila->estado_fiscal,
+                'cantidad' => (int) $fila->cantidad,
+            ]);
+    }
+
+    public function valorInventario(?int $empresaId = null): string
+    {
+        return (string) Producto::query()
+            ->where('controla_stock', true)
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id))
+            ->selectRaw('COALESCE(SUM(costo * stock), 0) as valor')
+            ->value('valor');
+    }
+
+    public function productosBajoMinimoQuery(?int $empresaId = null): Builder
+    {
+        return Producto::query()
+            ->activos()
+            ->bajoMinimo()
+            ->when($empresaId, fn (Builder $query, int $id) => $query->where('empresa_id', $id));
+    }
+
+    /**
+     * @return Collection<int, Producto>
+     */
+    public function productosBajoMinimo(?int $empresaId = null): Collection
+    {
+        return $this->productosBajoMinimoQuery($empresaId)->orderBy('nombre')->get();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Compras
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function comprasEnRangoQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return Compra::query()
+            ->whereBetween('fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('empresa_id', $id))
+            ->with(['proveedor', 'user']);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Arqueos de caja
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function arqueosEnRangoQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        return ArqueoCaja::query()
+            ->whereBetween('abierto_en', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('empresa_id', $id))
+            ->with(['user', 'caja']);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Kardex (movimientos de inventario)
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function kardexQuery(Carbon $desde, Carbon $hasta, ?int $productoId = null, ?int $empresaId = null): Builder
+    {
+        return MovimientoInventario::query()
+            ->whereBetween('created_at', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('empresa_id', $id))
+            ->when($productoId, fn (Builder $q, int $id) => $q->where('producto_id', $id))
+            ->with(['producto', 'user']);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Cuentas por cobrar (saldos abiertos)
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function cuentasPorCobrarQuery(?int $empresaId = null): Builder
+    {
+        return CuentaPorCobrar::query()
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('empresa_id', $id))
+            ->whereRaw('(monto_total - monto_pagado) > 0')
+            ->with(['cliente', 'venta']);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Cuentas por pagar (saldos abiertos)
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function cuentasPorPagarQuery(?int $empresaId = null): Builder
+    {
+        return CuentaPorPagar::query()
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('empresa_id', $id))
+            ->whereRaw('(monto_total - monto_pagado) > 0')
+            ->with(['proveedor', 'compra']);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Margen por producto
+    // ──────────────────────────────────────────────────────────────────────
+
+    public function margenPorProductoQuery(Carbon $desde, Carbon $hasta, ?int $empresaId = null): Builder
+    {
+        // Costo de cada línea: el que quedó guardado al vender (detalle_ventas.costo_unitario, ya
+        // multiplicado por el factor de la presentación). Las ventas anteriores a ese campo no lo
+        // tienen: para ellas se usa el costo actual del producto × factor, como aproximación.
+        $costoLinea = 'detalle_ventas.cantidad * COALESCE(detalle_ventas.costo_unitario, productos.costo * detalle_ventas.factor)';
+
+        // Merma del producto en el mismo rango: lo que salió del Kardex como merma (registrada a
+        // mano o por devolución de cliente) valorado al costo guardado en el movimiento, sin las
+        // anuladas. Movimientos anteriores al campo costo_unitario usan el costo actual.
+        $mermaSql = <<<'SQL'
+            COALESCE((
+                SELECT SUM(mermas.cantidad * COALESCE(mermas.costo_unitario, productos.costo))
+                FROM movimientos_inventario AS mermas
+                WHERE mermas.producto_id = productos.id
+                  AND mermas.origen = ?
+                  AND mermas.tipo = ?
+                  AND mermas.created_at BETWEEN ? AND ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM movimientos_inventario AS reversiones
+                      WHERE reversiones.revierte_movimiento_id = mermas.id
+                  )
+            ), 0)
+            SQL;
+        $mermaBindings = [
+            OrigenMovimiento::MERMA->value,
+            TipoMovimiento::SALIDA->value,
+            $desde->copy()->startOfDay(),
+            $hasta->copy()->endOfDay(),
+        ];
+
+        return Producto::query()
+            ->join('detalle_ventas', 'detalle_ventas.producto_id', '=', 'productos.id')
+            ->join('ventas', 'ventas.id', '=', 'detalle_ventas.venta_id')
+            ->whereBetween('ventas.fecha', [$desde->copy()->startOfDay(), $hasta->copy()->endOfDay()])
+            ->where('ventas.estado', '!=', EstadoVenta::ANULADA)
+            ->whereNull('ventas.venta_modificada_id')
+            ->when($empresaId, fn (Builder $q, int $id) => $q->where('ventas.empresa_id', $id))
+            ->groupBy('productos.id', 'productos.codigo', 'productos.nombre', 'productos.costo')
+            ->selectRaw('productos.id, productos.codigo, productos.nombre, productos.costo')
+            ->selectRaw('COALESCE(SUM(detalle_ventas.cantidad), 0) as unidades_vendidas')
+            ->selectRaw('COALESCE(SUM(detalle_ventas.subtotal), 0) as ingresos')
+            ->selectRaw("COALESCE(SUM({$costoLinea}), 0) as costo_total")
+            ->selectRaw("COALESCE(SUM(detalle_ventas.subtotal) - SUM({$costoLinea}), 0) as ganancia")
+            ->selectRaw("CASE WHEN SUM(detalle_ventas.subtotal) > 0 THEN ROUND(((SUM(detalle_ventas.subtotal) - SUM({$costoLinea})) / SUM(detalle_ventas.subtotal)) * 100, 2) ELSE 0 END as margen_porcentaje")
+            ->selectRaw("{$mermaSql} as merma", $mermaBindings)
+            ->selectRaw("COALESCE(SUM(detalle_ventas.subtotal) - SUM({$costoLinea}), 0) - {$mermaSql} as ganancia_real", $mermaBindings);
+    }
+
+}

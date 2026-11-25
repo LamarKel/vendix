@@ -1,0 +1,159 @@
+<?php
+
+namespace App\Providers;
+
+use App\Models\User;
+use App\Policies\ActivityPolicy;
+use App\Support\LicenciaSoloLectura;
+use App\Support\RegistroDeLentitud;
+use Filament\Events\TenantSet;
+use Filament\Pages\BasePage;
+use Filament\Schemas\Schema;
+use Filament\Tables\Table;
+use Illuminate\Cache\RateLimiting\Limit;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
+use Illuminate\Support\Facades\Gate;
+use Illuminate\Support\Facades\RateLimiter;
+use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\URL;
+use Illuminate\Support\Number;
+use Illuminate\Support\ServiceProvider;
+use Livewire\Livewire;
+use Spatie\Activitylog\Models\Activity;
+
+class AppServiceProvider extends ServiceProvider
+{
+    /**
+     * Register any application services.
+     */
+    public function register(): void
+    {
+        // Un candado por request: nunca debe sobrevivir de una request a la siguiente.
+        $this->app->scoped(LicenciaSoloLectura::class);
+
+        //
+    }
+
+    /**
+     * Bootstrap any application services.
+     */
+    public function boot(): void
+    {
+        $this->registrarLimitesDeUso();
+        RegistroDeLentitud::registrar();
+
+        // Activity vive en el namespace del paquete spatie/activitylog, no en App\Models: la
+        // convención de autodescubrimiento de Policies de Laravel (que solo mapea dentro del
+        // propio namespace del modelo) nunca encuentra ActivityPolicy para él. Sin este registro
+        // explícito, Filament no localiza ninguna policy y —al no estar en modo estricto— abre
+        // el acceso a AuditoriaResource por defecto en vez de negarlo.
+        // Fuerza HTTPS cuando la app está detrás de un proxy/túnel (ngrok, load balancer,
+        // Cloudflare, etc.) que termina TLS antes de llegar al contenedor. Sin esto, asset_url(),
+        // route() y url() generan enlaces http:// que el navegador bloquea como mixed-content.
+        if ($this->app->environment('local') && str_starts_with(config('app.url'), 'https')) {
+            URL::forceScheme('https');
+        }
+
+        Gate::policy(Activity::class, ActivityPolicy::class);
+
+        // Filament dispara este evento cada vez que fija el tenant activo: en cada request
+        // dentro del panel (vía IdentifyTenant) y también cuando el super-admin cambia de
+        // empresa con el switcher. En ambos casos hay que fijar el contexto de permisos a la
+        // empresa que se está viendo AHORA (el middleware EstablecerEmpresaPermisos solo pone la
+        // empresa propia del usuario como punto de partida, antes de que el tenant real esté
+        // resuelto — y para el super-admin, que no tiene empresa propia, este evento es la única
+        // fuente real de contexto) y limpiar las relaciones roles/permissions ya cargadas en
+        // memoria: si no, un cambio de empresa seguiría viendo los roles/permisos de la anterior
+        // hasta la siguiente request.
+        Event::listen(function (TenantSet $event): void {
+            setPermissionsTeamId($event->getTenant()->getKey());
+
+            $usuario = $event->getUser();
+
+            if (method_exists($usuario, 'unsetRelation')) {
+                $usuario->unsetRelation('roles')->unsetRelation('permissions');
+            }
+        });
+
+        // El super-admin no pertenece a ninguna empresa, así que no tiene (ni puede tener) un rol
+        // propio con 'teams' => true: en vez de forzarlo a un rol por empresa, se le concede todo
+        // de forma transversal aquí. No ensucia los roles de cada empresa y es el único punto que
+        // hay que tocar si algún día cambia cómo se identifica al super-admin.
+        Gate::before(fn (User $user, string $ability) => $user->es_super_admin ? true : null);
+
+        // Botones de formulario (Crear, Crear y crear otro, Cancelar) alineados a la derecha en
+        // TODAS las páginas Create/Edit del panel. BasePage es la clase base de la que heredan
+        // CreateRecord y EditRecord; al ser estático, un solo cambio aquí cubre todo el panel.
+        BasePage::alignFormActionsEnd();
+        BasePage::stickyFormActions();
+
+        // Densidad y formato por defecto de TODAS las tablas del panel (PASO 5): un solo lugar en
+        // vez de repetir estas llamadas en cada Resource. 'es_DO' es lo que hace que ->money('DOP')
+        // (tablas e infolists, ambos leen su locale de aquí) se muestre como "RD$1,234.50" — con
+        // el locale de la app ('en', ver config/app.php) sale "1.234,50 DOP". No se toca
+        // config('app.locale') porque afectaría fechas/traducciones fuera del panel; esto solo
+        // cambia el formato numérico que usan los componentes de Filament.
+        Table::configureUsing(function (Table $table): void {
+            $table
+                ->defaultNumberLocale('es_DO')
+                ->defaultCurrency('DOP')
+                ->paginationPageOptions([10, 25])
+                ->defaultPaginationPageOption(10);
+        });
+
+        Schema::configureUsing(function (Schema $schema): void {
+            $schema
+                ->defaultNumberLocale('es_DO')
+                ->defaultCurrency('DOP');
+        });
+
+        // Mismo motivo que arriba, pero para los widgets de KPIs (ReporteStatsOverviewWidget),
+        // que arman su valor con Number::currency() directo en PHP en vez de un componente de
+        // Filament — Table/Schema::configureUsing() no los cubre. Number::useLocale() es el
+        // equivalente global de Laravel: mismo 'es_DO', mismo resultado "RD$1,234.50".
+        Number::useLocale('es_DO');
+
+        // Búsqueda de texto insensible a acentos y mayúsculas ("jose" encuentra "José") para las
+        // consultas manuales (POS, modales): mismo criterio que Filament aplica a sus propias
+        // búsquedas vía config('database.connections.pgsql.search_collation'). Sin esa collation
+        // (otro driver) cae a un ilike/like normal. Solo para campos de texto libre (nombres,
+        // razón social); códigos, RNC y códigos de barra siguen con ilike.
+        Builder::macro('whereLikeSinAcentos', function (string $columna, string $valor, string $boolean = 'and'): Builder {
+            /** @var Builder $this */
+            $conexion = $this->getConnection();
+            $collation = $conexion->getConfig('search_collation');
+            $columna = $conexion->getQueryGrammar()->wrap($columna);
+            $comparacion = filled($collation)
+                ? "{$columna} collate \"{$collation}\" like ?"
+                : $columna.' '.($conexion->getDriverName() === 'pgsql' ? 'ilike' : 'like').' ?';
+
+            return $this->whereRaw($comparacion, ["%{$valor}%"], $boolean);
+        });
+
+        Builder::macro('orWhereLikeSinAcentos', function (string $columna, string $valor): Builder {
+            /** @var Builder $this */
+            return $this->whereLikeSinAcentos($columna, $valor, 'or');
+        });
+    }
+
+    /**
+     * Límites de uso por minuto (config/instalacion.php → limites). La clave es el usuario si hay
+     * sesión y la IP si no, para que un cajero no le gaste el cupo a otro detrás del mismo router.
+     */
+    private function registrarLimitesDeUso(): void
+    {
+        $por = fn (Request $request): string => (string) ($request->user()?->getAuthIdentifier() ?? $request->ip());
+
+        foreach (['livewire' => 'livewire', 'pdf' => 'pdf', 'reportes-pdf' => 'reportes_pdf'] as $nombre => $clave) {
+            RateLimiter::for($nombre, fn (Request $request) => Limit::perMinute(
+                max(1, (int) config("instalacion.limites.{$clave}"))
+            )->by($nombre.':'.$por($request)));
+        }
+
+        // Todas las acciones de Livewire (panel, POS, pantalla del cliente) pasan por esta ruta.
+        Livewire::setUpdateRoute(fn ($handle) => Route::post('/livewire/update', $handle)
+            ->middleware(['web', 'throttle:livewire']));
+    }
+}

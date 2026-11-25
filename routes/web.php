@@ -1,0 +1,115 @@
+<?php
+
+use App\Http\Controllers\AprobacionComercialEcfController;
+use App\Http\Controllers\ArqueoCajaPdfController;
+use App\Http\Controllers\CotizacionPdfController;
+use App\Http\Controllers\ImpresoraPruebaController;
+use App\Http\Controllers\OrdenCompraPdfController;
+use App\Http\Controllers\PedidoCompraPdfController;
+use App\Http\Controllers\RecepcionEcfController;
+use App\Http\Controllers\Reportes\ReporteArqueosPdfController;
+use App\Http\Controllers\Reportes\ReporteComprasPdfController;
+use App\Http\Controllers\Reportes\ReporteCxcPdfController;
+use App\Http\Controllers\Reportes\ReporteCxpPdfController;
+use App\Http\Controllers\Reportes\ReporteFiscal607PdfController;
+use App\Http\Controllers\Reportes\ReporteInventarioPdfController;
+use App\Http\Controllers\Reportes\ReporteKardexPdfController;
+use App\Http\Controllers\Reportes\ReporteMargenPdfController;
+use App\Http\Controllers\Reportes\ReporteTopProductosPdfController;
+use App\Http\Controllers\Reportes\ReporteVentasPdfController;
+use App\Http\Controllers\Reportes\ReporteVentasPorClientePdfController;
+use App\Http\Controllers\Reportes\ReporteVentasPorVendedorPdfController;
+use App\Http\Controllers\RncController;
+use App\Http\Controllers\VentaComprobanteController;
+use App\Http\Controllers\VentaEcfXmlController;
+use App\Http\Controllers\VentaTicketController;
+use App\Http\Middleware\EstablecerEmpresaPermisos;
+use App\Livewire\DisplayCliente;
+use Illuminate\Support\Facades\Route;
+
+// La app es 100% panel de Filament: la raíz solo redirige a /admin (login incluido).
+Route::redirect('/', '/admin');
+
+// Consulta de RNC/cédula: solo con sesión iniciada. Antes era pública y cualquiera en internet
+// podía usar el servidor como buscador de contribuyentes.
+Route::get('/rnc/{rnc}', [RncController::class, 'consultar'])
+    ->where('rnc', '[0-9]{9,11}')
+    ->middleware(['auth', 'throttle:10,1'])
+    ->name('rnc.consultar');
+
+// Rutas autenticadas fuera del panel de Filament (PDFs, tickets, exportaciones).
+// EstablecerEmpresaPermisos es OBLIGATORIO aquí: spatie/laravel-permission con 'teams' => true
+// necesita setPermissionsTeamId() para resolver permisos — en el panel lo aporta el middleware
+// registrado en AdminPanelProvider, pero estas rutas van por fuera; sin él, $user->can('...')
+// devuelve false para cualquier usuario normal y la ruta responde 403.
+// throttle:pdf — generar un PDF es de lo más costoso para el servidor (config/instalacion.php).
+Route::middleware(['auth', EstablecerEmpresaPermisos::class, 'throttle:pdf'])->group(function () {
+    Route::get('/ventas/{venta}/pdf', VentaComprobanteController::class)
+        ->middleware('can:ventas.imprimir')
+        ->name('ventas.pdf');
+
+    Route::get('/ventas/{venta}/xml', VentaEcfXmlController::class)
+        ->middleware('can:ventas.ver')
+        ->name('ventas.ecf.xml');
+
+    Route::get('/pedidos-compra/{pedidoCompra}/pdf', PedidoCompraPdfController::class)
+        ->middleware('can:compras.ver')
+        ->name('pedidos-compra.pdf');
+
+    Route::get('/ordenes-compra/{ordenCompra}/pdf', OrdenCompraPdfController::class)
+        ->middleware('can:ordenes_compra.exportar')
+        ->name('ordenes-compra.pdf');
+
+    Route::get('/cotizaciones/{cotizacion}/pdf', CotizacionPdfController::class)
+        ->middleware('can:cotizaciones.exportar')
+        ->name('cotizaciones.pdf');
+
+    Route::get('/arqueos-caja/{arqueoCaja}/pdf', ArqueoCajaPdfController::class)
+        ->middleware('can:gestionar_arqueo_caja')
+        ->name('arqueos-caja.pdf');
+
+    Route::get('/ventas/{venta}/ticket', VentaTicketController::class)
+        ->middleware('can:ventas.imprimir')
+        ->name('ventas.ticket');
+
+    Route::get('/impresoras/{impresora}/prueba', ImpresoraPruebaController::class)
+        ->middleware('can:impresoras.administrar')
+        ->name('impresoras.prueba');
+
+
+    // Todas las rutas de este grupo generan PDFs para descargar: es la acción "exportar", distinta
+    // de solo ver el reporte en pantalla (reportes.ver, gateado a nivel de página).
+    Route::middleware(['can:reportes.exportar', 'throttle:reportes-pdf'])->prefix('reportes')->name('reportes.')->group(function () {
+        Route::get('/ventas/pdf', ReporteVentasPdfController::class)->name('ventas.pdf');
+        Route::get('/top-productos/pdf', ReporteTopProductosPdfController::class)->name('top-productos.pdf');
+        Route::get('/ventas-por-cliente/pdf', ReporteVentasPorClientePdfController::class)->name('ventas-por-cliente.pdf');
+        Route::get('/ventas-por-vendedor/pdf', ReporteVentasPorVendedorPdfController::class)->name('ventas-por-vendedor.pdf');
+        Route::get('/inventario/pdf', ReporteInventarioPdfController::class)->name('inventario.pdf');
+        Route::get('/fiscal-607/pdf', ReporteFiscal607PdfController::class)->name('fiscal-607.pdf');
+        Route::get('/compras/pdf', ReporteComprasPdfController::class)->name('compras.pdf');
+        Route::get('/arqueos/pdf', ReporteArqueosPdfController::class)->name('arqueos.pdf');
+        Route::get('/kardex/pdf', ReporteKardexPdfController::class)->name('kardex.pdf');
+        Route::get('/cxc/pdf', ReporteCxcPdfController::class)->name('cxc.pdf');
+        Route::get('/cxp/pdf', ReporteCxpPdfController::class)->name('cxp.pdf');
+        Route::get('/margen/pdf', ReporteMargenPdfController::class)->name('margen.pdf');
+    });
+});
+
+// Display del cliente de una caja registradora (segundo monitor/TV): público, sin login — el
+// token de 64 caracteres de la caja es la credencial (ver App\Livewire\DisplayCliente). El
+// throttle solo cubre la carga inicial; el polling va por /livewire/update.
+Route::get('/display/{token}', DisplayCliente::class)
+    ->where('token', '[A-Za-z0-9]{64}')
+    ->middleware('throttle:30,1')
+    ->name('display.cliente');
+
+// URLs públicas que se registran en el portal de la DGII (ella misma las llama, sin sesión ni
+// CSRF — ver bootstrap/app.php). Seguridad: RNC/tamaño/rate limit/registro en RecepcionEcfService.
+// Ver docs/dgii-recepcion.md para qué URL de producción registrar.
+Route::post('/fe/recepcion/api/ecf', RecepcionEcfController::class)
+    ->middleware('throttle:30,1')
+    ->name('dgii.recepcion');
+
+Route::post('/fe/aprobacioncomercial/api/ecf', AprobacionComercialEcfController::class)
+    ->middleware('throttle:30,1')
+    ->name('dgii.aprobacioncomercial');

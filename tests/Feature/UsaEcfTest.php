@@ -1,0 +1,279 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Enums\EstadoFiscal;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoProducto;
+use App\Exceptions\VentaInvalidaException;
+use App\Filament\Resources\DocumentoRecibidoResource;
+use App\Filament\Resources\EmpresaResource\Pages\EditEmpresa;
+use App\Filament\Resources\SecuenciaNcfResource;
+use App\Jobs\EnviarEcfJob;
+use App\Models\Cliente;
+use App\Models\Producto;
+use App\Models\SecuenciaNcf;
+use App\Models\User;
+use App\Services\SecuenciaNcfService;
+use App\Services\VentaService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Queue;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
+use Tests\TestCase;
+
+class UsaEcfTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private function producto(float $stock = 10): Producto
+    {
+        return Producto::create([
+            'codigo' => 'SE-001',
+            'nombre' => 'Producto sin e-CF',
+            'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 50,
+            'precio' => 100,
+            'tasa_itbis' => TasaItbis::DIECIOCHO,
+            'controla_stock' => true,
+            'stock' => $stock,
+            'stock_minimo' => 1,
+            'activo' => true,
+        ]);
+    }
+
+    private function secuenciaFisicaConsumo(): void
+    {
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO_FISICA->value,
+            'prefijo' => 'B02',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 1000,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+    }
+
+    /**
+     * Desde el soporte de comprobantes físicos (tipo B): una empresa sin e-CF ya NO se queda sin
+     * NCF — usa el equivalente físico (B02) por defecto, con NCF real y estado_fiscal NO_APLICA,
+     * pero sin transmitir nada al PAC.
+     */
+    public function test_una_empresa_sin_ecf_usa_comprobante_fisico_por_defecto(): void
+    {
+        Queue::fake();
+
+        $this->empresaDefault->update(['usa_ecf' => false]);
+        $this->secuenciaFisicaConsumo();
+
+        $producto = $this->producto();
+        $cliente = Cliente::create(['nombre' => 'Cliente sin e-CF', 'activo' => true]);
+
+        $venta = app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'user_id' => null,
+            'lineas' => [['producto_id' => $producto->id, 'cantidad' => 1]],
+        ], $this->empresaDefault);
+
+        $this->assertSame('B0200000001', $venta->ncf);
+        $this->assertSame(TipoComprobante::FACTURA_CONSUMO_FISICA, $venta->tipo_comprobante);
+        $this->assertSame(EstadoFiscal::NO_APLICA, $venta->estado_fiscal);
+        $this->assertFalse($venta->esElectronica());
+
+        Queue::assertNotPushed(EnviarEcfJob::class);
+    }
+
+    /**
+     * Sin secuencia física configurada, una empresa sin e-CF no puede vender en absoluto: ya no
+     * existe el modo "sin ningún NCF" (toda venta necesita un rango real, físico o electrónico).
+     */
+    public function test_una_empresa_sin_ecf_y_sin_secuencia_fisica_configurada_no_puede_vender(): void
+    {
+        $this->empresaDefault->update(['usa_ecf' => false]);
+
+        $producto = $this->producto();
+        $cliente = Cliente::create(['nombre' => 'Cliente sin secuencia', 'activo' => true]);
+
+        $this->expectExceptionMessage('No hay una secuencia de NCF activa para el comprobante B02');
+
+        app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'lineas' => [['producto_id' => $producto->id, 'cantidad' => 1]],
+        ], $this->empresaDefault);
+    }
+
+    /**
+     * La regla de RNC obligatorio en Consumo por encima del umbral es de la norma DGII sobre el
+     * TIPO de comprobante (Consumo), no una particularidad del e-CF: aplica igual sin e-CF, con
+     * el B02 físico.
+     */
+    public function test_una_empresa_sin_ecf_tambien_exige_rnc_del_comprador_en_consumo_alto(): void
+    {
+        Queue::fake();
+
+        $this->empresaDefault->update(['usa_ecf' => false]);
+        $this->secuenciaFisicaConsumo();
+
+        $producto = $this->producto(stock: 5000);
+        $cliente = Cliente::create(['nombre' => 'Consumidor sin RNC', 'activo' => true]);
+
+        $this->expectException(VentaInvalidaException::class);
+        $this->expectExceptionMessage('Para facturas de consumo de RD$250,000 o más, el cliente con RNC/Cédula es obligatorio.');
+
+        app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'user_id' => null,
+            'lineas' => [['producto_id' => $producto->id, 'cantidad' => 3000]],
+        ], $this->empresaDefault);
+    }
+
+    /**
+     * Una empresa sin e-CF no puede emitir un tipo electrónico explícito (E32): ni siquiera con
+     * una secuencia electrónica cargada, porque no está habilitada para transmitir al PAC.
+     */
+    public function test_una_empresa_sin_ecf_no_puede_forzar_un_tipo_electronico_explicito(): void
+    {
+        $this->empresaDefault->update(['usa_ecf' => false]);
+
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO->value,
+            'prefijo' => 'E32',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 1000,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $producto = $this->producto();
+        $cliente = Cliente::create(['nombre' => 'Cliente sin e-CF', 'activo' => true]);
+
+        $this->expectException(VentaInvalidaException::class);
+        $this->expectExceptionMessage('no tiene facturación electrónica habilitada');
+
+        app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO->value,
+            'lineas' => [['producto_id' => $producto->id, 'cantidad' => 1]],
+        ], $this->empresaDefault);
+    }
+
+    /**
+     * ECF_RECIBIDOS sigue exigiendo e-CF (es recepción electrónica de proveedores). ECF_SECUENCIAS
+     * (Secuencias NCF) YA NO lo exige: sin e-CF, la empresa todavía necesita gestionar sus propios
+     * rangos físicos (B0X) — ocultarlo la dejaría sin forma de cargar uno.
+     */
+    public function test_secuencias_ncf_sigue_accesible_sin_ecf_pero_ecf_recibidos_no(): void
+    {
+        Permission::firstOrCreate(['name' => 'secuencias.administrar', 'guard_name' => 'web']);
+        Permission::firstOrCreate(['name' => 'ecf.gestionar', 'guard_name' => 'web']);
+        $rol = Role::firstOrCreate(['name' => 'Administrador', 'guard_name' => 'web']);
+        $rol->syncPermissions(['secuencias.administrar', 'ecf.gestionar']);
+
+        $usuario = User::factory()->create(['empresa_id' => $this->empresaDefault->id]);
+        $usuario->assignRole('Administrador');
+        $this->actingAs($usuario);
+
+        // Con e-CF activo (default de la fábrica), la permisología ya alcanza para entrar.
+        $this->assertTrue(SecuenciaNcfResource::canAccess());
+        $this->assertTrue(DocumentoRecibidoResource::canAccess());
+
+        $this->empresaDefault->update(['usa_ecf' => false]);
+
+        $this->assertTrue(SecuenciaNcfResource::canAccess());
+        $this->assertFalse(DocumentoRecibidoResource::canAccess());
+    }
+
+    private function secuenciaCreditoFiscalElectronica(): void
+    {
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CREDITO_FISCAL->value,
+            'prefijo' => 'E31',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 1000,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+    }
+
+    /** Sin e-CF, tiposDisponibles() excluye los electrónicos aunque tengan secuencia cargada. */
+    public function test_empresa_sin_ecf_solo_tiene_disponibles_los_tipos_b(): void
+    {
+        $this->empresaDefault->update(['usa_ecf' => false]);
+        $this->secuenciaFisicaConsumo();
+        $this->secuenciaCreditoFiscalElectronica();
+
+        $tipos = app(SecuenciaNcfService::class)->tiposDisponibles($this->empresaDefault);
+
+        $this->assertContains(TipoComprobante::FACTURA_CONSUMO_FISICA, $tipos);
+        $this->assertNotContains(TipoComprobante::FACTURA_CREDITO_FISCAL, $tipos);
+    }
+
+    /** Con e-CF, una empresa puede tener a la vez tipos B y E disponibles. */
+    public function test_empresa_con_ecf_tiene_disponibles_todos_los_tipos_con_secuencia(): void
+    {
+        $this->empresaDefault->update(['usa_ecf' => true]);
+        $this->secuenciaFisicaConsumo();
+        $this->secuenciaCreditoFiscalElectronica();
+
+        $tipos = app(SecuenciaNcfService::class)->tiposDisponibles($this->empresaDefault);
+
+        $this->assertContains(TipoComprobante::FACTURA_CONSUMO_FISICA, $tipos);
+        $this->assertContains(TipoComprobante::FACTURA_CREDITO_FISCAL, $tipos);
+    }
+
+    /** El toggle de EmpresaResource persiste usa_ecf en ambos sentidos. */
+    public function test_el_toggle_usa_ecf_se_guarda(): void
+    {
+        // Antes fallaba al azar: la fábrica a veces genera un RNC con 0 inicial y el campo
+        // numérico lo rechazaba. Se fija uno así a propósito para cubrir ese caso.
+        $this->empresaDefault->update(['rnc' => '012345678']);
+
+        $superAdmin = User::factory()->create(['empresa_id' => null, 'es_super_admin' => true]);
+        $this->empresaDefault->update(['usa_ecf' => false]);
+
+        Livewire::actingAs($superAdmin)
+            ->test(EditEmpresa::class, ['record' => $this->empresaDefault->getRouteKey()])
+            ->assertFormSet(['usa_ecf' => false])
+            ->fillForm(['usa_ecf' => true])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $this->assertTrue($this->empresaDefault->fresh()->usa_ecf);
+
+        Livewire::actingAs($superAdmin)
+            ->test(EditEmpresa::class, ['record' => $this->empresaDefault->getRouteKey()])
+            ->fillForm(['usa_ecf' => false])
+            ->call('save')
+            ->assertHasNoFormErrors();
+
+        $this->assertFalse($this->empresaDefault->fresh()->usa_ecf);
+    }
+
+    /** Un electrónico de venta que EcfBuilder no soporta (44) no se ofrece aunque tenga secuencia. */
+    public function test_tipos_electronicos_sin_soporte_en_el_builder_no_se_ofrecen(): void
+    {
+        $this->empresaDefault->update(['usa_ecf' => true]);
+        $this->secuenciaCreditoFiscalElectronica();
+
+        SecuenciaNcf::create([
+            'empresa_id' => $this->empresaDefault->id,
+            'tipo_comprobante' => TipoComprobante::REGIMENES_ESPECIALES,
+            'prefijo' => 'E44',
+            'secuencia_desde' => 1,
+            'secuencia_hasta' => 100,
+            'secuencia_actual' => 0,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $tipos = app(SecuenciaNcfService::class)->tiposDisponibles($this->empresaDefault);
+
+        $this->assertContains(TipoComprobante::FACTURA_CREDITO_FISCAL, $tipos);
+        $this->assertNotContains(TipoComprobante::REGIMENES_ESPECIALES, $tipos);
+    }
+}

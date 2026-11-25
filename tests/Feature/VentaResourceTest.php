@@ -1,0 +1,234 @@
+<?php
+
+namespace Tests\Feature;
+
+use App\Enums\AmbienteEcf;
+use App\Enums\EstadoFiscal;
+use App\Enums\FormaPago;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoProducto;
+use App\Filament\Resources\VentaResource\Pages\ListVentas;
+use App\Filament\Resources\VentaResource\Pages\ViewVenta;
+use App\Models\Cliente;
+use App\Models\Producto;
+use App\Models\SecuenciaNcf;
+use App\Models\User;
+use App\Models\Venta;
+use App\Services\ArqueoCajaService;
+use App\Services\VentaService;
+use Illuminate\Database\Events\QueryExecuted;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Once;
+use Livewire\Livewire;
+use Spatie\Permission\Models\Permission;
+use Spatie\Permission\Models\Role;
+use Tests\TestCase;
+
+class VentaResourceTest extends TestCase
+{
+    use RefreshDatabase;
+
+    private Producto $producto;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Permission::firstOrCreate(['name' => 'ventas.ver', 'guard_name' => 'web']);
+        Permission::firstOrCreate(['name' => 'ventas.anular', 'guard_name' => 'web']);
+
+        SecuenciaNcf::create([
+            'tipo_comprobante' => TipoComprobante::FACTURA_CONSUMO,
+            'prefijo' => 'E32',
+            'secuencia_desde' => 1,
+            'secuencia_actual' => 1,
+            'secuencia_hasta' => 100,
+            'vencimiento' => now()->addYear(),
+            'activa' => true,
+        ]);
+
+        $this->producto = Producto::create([
+            'codigo' => 'VR-001',
+            'nombre' => 'Producto VentaResource',
+            'tipo' => TipoProducto::PRODUCTO,
+            'costo' => 50,
+            'precio' => 100,
+            'tasa_itbis' => TasaItbis::DIECIOCHO,
+            'controla_stock' => true,
+            'stock' => 10,
+            'stock_minimo' => 1,
+            'activo' => true,
+        ]);
+    }
+
+    private function crearVenta(): Venta
+    {
+        $cliente = Cliente::create(['nombre' => 'Cliente Resource', 'activo' => true]);
+
+        return app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'user_id' => null,
+            'lineas' => [['producto_id' => $this->producto->id, 'cantidad' => 2]],
+        ], $this->empresaDefault);
+    }
+
+    private function usuarioConPermisos(array $permisos): User
+    {
+        $rol = Role::firstOrCreate(['name' => 'Rol-'.implode('-', $permisos), 'guard_name' => 'web']);
+        $rol->syncPermissions($permisos);
+
+        $usuario = User::factory()->create();
+        $usuario->assignRole($rol);
+
+        return $usuario;
+    }
+
+    public function test_lista_ventas_para_quien_tiene_permiso(): void
+    {
+        $this->crearVenta();
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver']))
+            ->test(ListVentas::class)
+            ->assertSuccessful()
+            ->assertCanSeeTableRecords(Venta::all());
+    }
+
+    public function test_el_listado_no_hace_mas_consultas_por_tener_mas_ventas(): void
+    {
+        Permission::firstOrCreate(['name' => 'ventas.imprimir', 'guard_name' => 'web']);
+        $usuario = $this->usuarioConPermisos(['ventas.ver', 'ventas.anular', 'ventas.imprimir']);
+
+        $contar = function () use ($usuario): int {
+            $consultas = 0;
+            DB::listen(function () use (&$consultas): void {
+                $consultas++;
+            });
+
+            Livewire::actingAs($usuario)->test(ListVentas::class)->assertSuccessful();
+
+            DB::getEventDispatcher()->forget(QueryExecuted::class);
+            Once::flush();
+
+            return $consultas;
+        };
+
+        $this->producto->update(['stock' => 100]);
+
+        $this->crearVenta();
+        $this->crearVenta();
+        $conDos = $contar();
+
+        foreach (range(1, 5) as $i) {
+            $this->crearVenta();
+        }
+        $conSiete = $contar();
+
+        // Antes: +2 consultas por cada venta listada (arqueo de caja e impresora por fila).
+        $this->assertSame($conDos, $conSiete, "El listado pasó de {$conDos} a {$conSiete} consultas al agregar 5 ventas (N+1).");
+    }
+
+    public function test_anular_repone_stock_y_marca_anulada(): void
+    {
+        $venta = $this->crearVenta();
+        // Anulación simple: el e-CF no llegó a ser válido ante la DGII (sin Nota de Crédito).
+        $venta->update(['estado_fiscal' => EstadoFiscal::RECHAZADO]);
+        $this->assertSame('8.000', $this->producto->refresh()->stock);
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver', 'ventas.anular']))
+            ->test(ListVentas::class)
+            ->callTableAction('anular', $venta, data: ['motivo' => 'Prueba de anulación'])
+            ->assertHasNoTableActionErrors();
+
+        $this->assertSame('10.000', $this->producto->refresh()->stock);
+        $this->assertSame('anulada', $venta->refresh()->estado->value);
+        $this->assertSame('Prueba de anulación', $venta->motivo_anulacion);
+    }
+
+    public function test_accion_anular_no_visible_sin_permiso(): void
+    {
+        $venta = $this->crearVenta();
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver']))
+            ->test(ListVentas::class)
+            ->assertTableActionHidden('anular', $venta);
+    }
+
+    public function test_accion_anular_no_visible_si_ya_esta_anulada(): void
+    {
+        $venta = $this->crearVenta();
+        // Anulación simple: el e-CF no llegó a ser válido ante la DGII (sin Nota de Crédito).
+        $venta->update(['estado_fiscal' => EstadoFiscal::RECHAZADO]);
+        app(VentaService::class)->anular($venta, 'motivo previo', null);
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver', 'ventas.anular']))
+            ->test(ListVentas::class)
+            ->assertTableActionHidden('anular', $venta->refresh());
+    }
+
+    public function test_accion_anular_no_visible_si_el_arqueo_de_la_venta_ya_cerro(): void
+    {
+        $cajero = User::factory()->create();
+        $arqueo = app(ArqueoCajaService::class)->abrir('500.00', $cajero->id, $this->empresaDefault);
+
+        $cliente = Cliente::create(['nombre' => 'Cliente Resource', 'activo' => true]);
+        $venta = app(VentaService::class)->registrar([
+            'cliente_id' => $cliente->id,
+            'user_id' => $cajero->id,
+            'forma_pago' => FormaPago::EFECTIVO,
+            'arqueo_caja_id' => $arqueo->id,
+            'lineas' => [['producto_id' => $this->producto->id, 'cantidad' => 2]],
+        ], $this->empresaDefault);
+
+        app(ArqueoCajaService::class)->cerrar($arqueo, '736.00', null, $cajero->id);
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver', 'ventas.anular']))
+            ->test(ListVentas::class)
+            ->assertTableActionHidden('anular', $venta->refresh());
+    }
+
+    public function test_filtra_por_estado_fiscal_y_por_ambiente(): void
+    {
+        // El FakeGateway (cola 'sync' en pruebas) acepta la venta automáticamente al cobrar.
+        $venta = $this->crearVenta()->refresh();
+        $this->assertSame(EstadoFiscal::ACEPTADO, $venta->estado_fiscal);
+        $this->assertSame(AmbienteEcf::TESTECF, $venta->ambiente);
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver']))
+            ->test(ListVentas::class)
+            ->filterTable('estado_fiscal', EstadoFiscal::ACEPTADO->value)
+            ->assertCanSeeTableRecords([$venta])
+            ->filterTable('estado_fiscal', EstadoFiscal::RECHAZADO->value)
+            ->assertCanNotSeeTableRecords([$venta])
+            ->removeTableFilter('estado_fiscal')
+            ->filterTable('ambiente', AmbienteEcf::TESTECF->value)
+            ->assertCanSeeTableRecords([$venta])
+            ->filterTable('ambiente', AmbienteEcf::ECF->value)
+            ->assertCanNotSeeTableRecords([$venta]);
+    }
+
+    public function test_estado_rfce_se_muestra_como_aceptado_sin_romper_el_listado(): void
+    {
+        // Consumo (32) por debajo del umbral: el PAC lo convierte a RFCE, no es un error.
+        $venta = $this->crearVenta()->refresh();
+        $venta->update(['estado_fiscal' => EstadoFiscal::RFCE]);
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver']))
+            ->test(ListVentas::class)
+            ->assertSuccessful()
+            ->assertCanSeeTableRecords([$venta->refresh()])
+            ->assertSee('Aceptado (RFCE)');
+    }
+
+    public function test_la_pagina_de_ver_muestra_cabecera_y_lineas(): void
+    {
+        $venta = $this->crearVenta();
+
+        Livewire::actingAs($this->usuarioConPermisos(['ventas.ver']))
+            ->test(ViewVenta::class, ['record' => $venta->id])
+            ->assertSuccessful()
+            ->assertSee($venta->ncf)
+            ->assertSee('Producto VentaResource');
+    }
+}

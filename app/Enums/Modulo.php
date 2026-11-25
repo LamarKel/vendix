@@ -1,0 +1,150 @@
+<?php
+
+namespace App\Enums;
+
+/**
+ * Catálogo de módulos funcionales que una empresa puede habilitar o deshabilitar (T4). Cada caso
+ * corresponde a un Resource o Page real de Filament — no incluye Configuración/Empresa, Usuarios
+ * ni Roles porque esos SIEMPRE deben estar disponibles (sin ellos la empresa se queda sin forma
+ * de administrarse), así que nunca pasan por RestringidoPorModulo. Tampoco incluye Reportes (son
+ * rutas planas fuera del panel de Filament, no un Resource/Page con canAccess()) ni un "ECF
+ * monitoreo" separado (el estado fiscal de una venta se ve dentro de VENTAS_LISTADO, no en una
+ * pantalla propia).
+ */
+enum Modulo: string
+{
+    case MAESTROS_CLIENTES = 'maestros_clientes';
+    case MAESTROS_PROVEEDORES = 'maestros_proveedores';
+    case MAESTROS_PRODUCTOS = 'maestros_productos';
+    case MAESTROS_CATEGORIAS = 'maestros_categorias';
+    case MAESTROS_DESCUENTOS = 'maestros_descuentos';
+    case MAESTROS_PROMOCIONES = 'maestros_promociones';
+    case MAESTROS_LISTAS_PRECIO = 'maestros_listas_precio';
+
+    case COTIZACIONES = 'cotizaciones';
+
+    case VENTAS_POS = 'ventas_pos';
+    case VENTAS_LISTADO = 'ventas_listado';
+    case VENTAS_ARQUEO_CAJA = 'ventas_arqueo_caja';
+    case VENTAS_CAJAS = 'ventas_cajas';
+
+    case INVENTARIO_KARDEX = 'inventario_kardex';
+    case INVENTARIO_MERMAS = 'inventario_mermas';
+
+    case COMPRAS = 'compras';
+    case COMPRAS_PEDIDOS = 'compras_pedidos';
+    case COMPRAS_STOCK_BAJO = 'compras_stock_bajo';
+    case DEVOLUCIONES = 'devoluciones';
+
+    case CUENTAS_POR_COBRAR = 'cuentas_por_cobrar';
+    case CUENTAS_POR_PAGAR = 'cuentas_por_pagar';
+
+    case ECF_SECUENCIAS = 'ecf_secuencias';
+    case ECF_RECIBIDOS = 'ecf_recibidos';
+
+    case IMPRESORAS = 'impresoras';
+    case AUDITORIA = 'auditoria';
+
+    public function etiqueta(): string
+    {
+        return match ($this) {
+            self::MAESTROS_CLIENTES => 'Clientes',
+            self::MAESTROS_PROVEEDORES => 'Proveedores',
+            self::MAESTROS_PRODUCTOS => 'Productos',
+            self::MAESTROS_CATEGORIAS => 'Categorías',
+            self::MAESTROS_DESCUENTOS => 'Descuentos',
+            self::MAESTROS_PROMOCIONES => 'Promociones',
+            self::MAESTROS_LISTAS_PRECIO => 'Listas de Precio',
+            self::COTIZACIONES => 'Cotizaciones',
+            self::VENTAS_POS => 'Punto de Venta',
+            self::VENTAS_LISTADO => 'Ventas',
+            self::VENTAS_ARQUEO_CAJA => 'Arqueos de Caja',
+            self::VENTAS_CAJAS => 'Cajas registradoras (POS táctil y display)',
+            self::INVENTARIO_KARDEX => 'Kardex',
+            self::INVENTARIO_MERMAS => 'Mermas',
+            self::COMPRAS => 'Compras',
+            self::COMPRAS_PEDIDOS => 'Órdenes de Compra',
+            self::COMPRAS_STOCK_BAJO => 'Stock Bajo',
+            self::DEVOLUCIONES => 'Devoluciones a Proveedor',
+            self::CUENTAS_POR_COBRAR => 'Cuentas por Cobrar',
+            self::CUENTAS_POR_PAGAR => 'Cuentas por Pagar',
+            self::ECF_SECUENCIAS => 'Secuencias NCF',
+            self::ECF_RECIBIDOS => 'e-CF Recibidos',
+            self::IMPRESORAS => 'Impresoras',
+            self::AUDITORIA => 'Auditoría',
+        };
+    }
+
+    /** Agrupa los módulos en la UI de gestión (PASO 4) y no depende de $navigationGroup de Filament. */
+    public function grupo(): string
+    {
+        return match ($this) {
+            self::MAESTROS_CLIENTES, self::MAESTROS_PROVEEDORES,
+            self::MAESTROS_PRODUCTOS, self::MAESTROS_CATEGORIAS,
+            self::MAESTROS_DESCUENTOS, self::MAESTROS_PROMOCIONES,
+            self::MAESTROS_LISTAS_PRECIO => 'Maestros',
+
+            self::COTIZACIONES => 'Comercial',
+
+            self::VENTAS_POS, self::VENTAS_LISTADO, self::VENTAS_ARQUEO_CAJA,
+            self::VENTAS_CAJAS => 'Ventas',
+
+            self::INVENTARIO_KARDEX, self::INVENTARIO_MERMAS => 'Inventario',
+
+            self::COMPRAS, self::COMPRAS_PEDIDOS,
+            self::COMPRAS_STOCK_BAJO, self::DEVOLUCIONES => 'Compras',
+
+            self::CUENTAS_POR_COBRAR, self::CUENTAS_POR_PAGAR => 'Cuentas',
+
+            self::ECF_SECUENCIAS, self::ECF_RECIBIDOS => 'e-CF',
+
+            self::IMPRESORAS, self::AUDITORIA => 'Configuración',
+        };
+    }
+
+    /**
+     * Ningún caso de este enum es bloqueado: Configuración/Empresa, Usuarios y Roles —los únicos
+     * módulos que nunca pueden apagarse— directamente no están representados aquí (ver la nota de
+     * clase). El método existe para que RestringidoPorModulo tenga un único punto de verdad si
+     * algún día se agrega aquí un módulo que también deba quedar siempre activo.
+     */
+    public function esBloqueado(): bool
+    {
+        return false;
+    }
+
+    /**
+     * Módulos mínimos sin los que este no tiene sentido: no se puede vender sin productos, ni
+     * devolver algo a un proveedor sin el módulo de Compras (las devoluciones de este sistema son
+     * siempre CONTRA una compra registrada, ver DevolucionCompra::compra()).
+     *
+     * @return array<Modulo>
+     */
+    public function dependeDe(): array
+    {
+        return match ($this) {
+            self::VENTAS_POS => [self::MAESTROS_PRODUCTOS],
+            self::DEVOLUCIONES => [self::COMPRAS],
+            self::CUENTAS_POR_COBRAR => [self::VENTAS_LISTADO],
+            self::CUENTAS_POR_PAGAR => [self::COMPRAS],
+            default => [],
+        };
+    }
+
+    /**
+     * ECF_RECIBIDOS exige usa_ecf=true (T3): es la recepción de e-CF de proveedores vía el
+     * ecosistema electrónico de la DGII, no tiene sentido sin participar en él.
+     *
+     * ECF_SECUENCIAS (Secuencias NCF) YA NO exige usa_ecf: desde el soporte de comprobantes
+     * físicos (tipo B), toda empresa —tenga o no e-CF— necesita gestionar sus rangos de NCF
+     * (físicos B0X si no tiene e-CF; ambos si sí lo tiene). Excluirlo aquí sería dejar a una
+     * empresa sin e-CF sin forma de cargar su propio rango B02, bloqueando el POS por completo.
+     */
+    public function requiereEcf(): bool
+    {
+        return match ($this) {
+            self::ECF_RECIBIDOS => true,
+            default => false,
+        };
+    }
+}

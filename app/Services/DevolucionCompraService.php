@@ -1,0 +1,237 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\EstadoDevolucion;
+use App\Enums\OrigenMovimiento;
+use App\Enums\TasaItbis;
+use App\Enums\TipoMovimiento;
+use App\Models\Compra;
+use App\Models\DetalleCompra;
+use App\Models\DetalleDevolucionCompra;
+use App\Models\DevolucionCompra;
+use App\Models\Empresa;
+use App\Models\Producto;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
+
+class DevolucionCompraService
+{
+    public function __construct(
+        private readonly InventarioService $inventarioService,
+        private readonly CuentaPorPagarService $cuentaPorPagarService,
+    ) {}
+
+    /**
+     * Registra una devolución a proveedor sobre una compra ya registrada (nota de crédito).
+     * La compra original no se modifica: queda tal cual se digitó para cuadrar con la factura
+     * física; la devolución es un documento aparte que revierte stock y se descuenta en reportes.
+     *
+     * @param  array{
+     *   compra_id: int,
+     *   fecha:     Carbon,
+     *   motivo:    string,
+     *   lineas: array<int, array{
+     *     detalle_compra_id: int,
+     *     cantidad:           float,
+     *   }>
+     * } $datos
+     */
+    public function crear(array $datos, int $userId, Empresa $empresa): DevolucionCompra
+    {
+        // Descarta líneas incompletas (p. ej. una fila del repeater sin producto seleccionado)
+        // en vez de dejar que revienten más abajo con un ModelNotFoundException.
+        $datos['lineas'] = array_values(array_filter(
+            $datos['lineas'] ?? [],
+            fn (array $l) => filled($l['detalle_compra_id'] ?? null) && filled($l['cantidad'] ?? null),
+        ));
+
+        if (empty($datos['lineas'])) {
+            throw new RuntimeException('La devolución debe tener al menos una línea.');
+        }
+
+        return DB::transaction(function () use ($datos, $userId, $empresa) {
+            $compra = Compra::lockForUpdate()->where('empresa_id', $empresa->id)->findOrFail($datos['compra_id']);
+
+            if ($compra->estaAnulada()) {
+                throw new RuntimeException('No se puede devolver mercancía de una compra anulada.');
+            }
+
+            $lineasCalc = [];
+
+            foreach ($datos['lineas'] as $linea) {
+                $detalleCompra = DetalleCompra::where('compra_id', $compra->id)
+                    ->findOrFail($linea['detalle_compra_id']);
+
+                $cantidad = (string) ($linea['cantidad'] ?? '0');
+
+                if (bccomp($cantidad, '0', 3) <= 0) {
+                    throw new RuntimeException('La cantidad a devolver debe ser mayor a cero.');
+                }
+
+                $disponible = (string) $detalleCompra->cantidadDisponibleParaDevolver();
+
+                if (bccomp($cantidad, $disponible, 3) > 0) {
+                    throw new RuntimeException(
+                        "No puedes devolver {$cantidad} de «{$detalleCompra->producto->nombre}»: solo hay {$disponible} disponible para devolver."
+                    );
+                }
+
+                $cantidadStr = $cantidad;
+                $costoStr = (string) $detalleCompra->costo_unitario;
+                $porcentaje = $detalleCompra->tasa_itbis->porcentaje();
+                $porcentajeStr = (string) $porcentaje;
+
+                $subtotal = bcmul($costoStr, $cantidadStr, 2);
+                $itbisMonto = bcdiv(bcmul($subtotal, $porcentajeStr, 4), '100', 2);
+
+                $lineasCalc[] = [
+                    'detalle_compra_id' => $detalleCompra->id,
+                    'producto_id' => $detalleCompra->producto_id,
+                    'cantidad' => $cantidad,
+                    'costo_unitario' => $detalleCompra->costo_unitario,
+                    'tasa_itbis' => $detalleCompra->tasa_itbis,
+                    'subtotal' => $subtotal,
+                    'itbis_monto' => $itbisMonto,
+                ];
+            }
+
+            $totales = $this->calcularTotales($lineasCalc);
+
+            $devolucion = DevolucionCompra::create([
+                // Se deriva de la compra (su cabecera) en vez de depender de que Filament haya
+                // asociado el tenant automáticamente: este service puede invocarse fuera del
+                // ciclo de vida de una request de panel (colas, comandos, tests).
+                'empresa_id' => $compra->empresa_id,
+                'compra_id' => $compra->id,
+                'proveedor_id' => $compra->proveedor_id,
+                'user_id' => $userId,
+                'fecha' => $datos['fecha'],
+                'motivo' => $datos['motivo'],
+                'estado' => EstadoDevolucion::REGISTRADA,
+                ...$totales,
+            ]);
+
+            foreach ($lineasCalc as $linea) {
+                DetalleDevolucionCompra::create([
+                    'devolucion_compra_id' => $devolucion->id,
+                    'detalle_compra_id' => $linea['detalle_compra_id'],
+                    'producto_id' => $linea['producto_id'],
+                    'cantidad' => $linea['cantidad'],
+                    'costo_unitario' => $linea['costo_unitario'],
+                    'tasa_itbis' => $linea['tasa_itbis'],
+                    'itbis_monto' => $linea['itbis_monto'],
+                    'subtotal' => $linea['subtotal'],
+                ]);
+
+                $producto = Producto::where('empresa_id', $empresa->id)->find($linea['producto_id']);
+
+                if ($producto) {
+                    $this->inventarioService->registrarMovimiento(
+                        $producto,
+                        TipoMovimiento::SALIDA,
+                        OrigenMovimiento::DEVOLUCION_COMPRA,
+                        $linea['cantidad'],
+                        $devolucion->id,
+                        $userId,
+                        "Devolución a proveedor de compra #{$compra->id}",
+                    );
+                }
+            }
+
+            if ($compra->cuentaPorPagar !== null) {
+                $this->cuentaPorPagarService->reducirPorDevolucion($compra->cuentaPorPagar, (string) $totales['total']);
+            }
+
+            return $devolucion->load('detalles.producto', 'compra.proveedor');
+        });
+    }
+
+    /**
+     * Anula una devolución: revierte el stock salido y la marca como ANULADA.
+     */
+    public function anular(DevolucionCompra $devolucion, string $motivo, int $userId): DevolucionCompra
+    {
+        if ($devolucion->estaAnulada()) {
+            throw new RuntimeException('La devolución ya está anulada.');
+        }
+
+        return DB::transaction(function () use ($devolucion, $motivo, $userId) {
+            // Re-leer con lock para evitar anulación concurrente
+            $devolucion = DevolucionCompra::lockForUpdate()->findOrFail($devolucion->id);
+
+            if ($devolucion->estaAnulada()) {
+                throw new RuntimeException('La devolución ya está anulada.');
+            }
+
+            foreach ($devolucion->detalles as $detalle) {
+                $producto = $detalle->producto;
+
+                if ($producto) {
+                    $this->inventarioService->registrarMovimiento(
+                        $producto,
+                        TipoMovimiento::ENTRADA,
+                        OrigenMovimiento::ANULACION,
+                        (string) $detalle->cantidad,
+                        $devolucion->id,
+                        $userId,
+                        "Anulación devolución #{$devolucion->id}",
+                    );
+                }
+            }
+
+            $cuentaPorPagar = $devolucion->compra->cuentaPorPagar;
+
+            if ($cuentaPorPagar !== null) {
+                $this->cuentaPorPagarService->restaurarPorAnulacionDevolucion($cuentaPorPagar, (string) $devolucion->total);
+            }
+
+            $devolucion->update([
+                'estado' => EstadoDevolucion::ANULADA,
+                'motivo_anulacion' => $motivo,
+                'anulada_en' => now(),
+            ]);
+
+            return $devolucion->refresh();
+        });
+    }
+
+    /** Agrupa totales de la cabecera. Público: reutilizado por DevolucionCompraResource. */
+    public function calcularTotales(array $lineas): array
+    {
+        $montoGravado18 = '0';
+        $montoGravado16 = '0';
+        $montoGravado0 = '0';
+        $subtotal = '0';
+
+        foreach ($lineas as $l) {
+            $sub = (string) $l['subtotal'];
+            $subtotal = bcadd($subtotal, $sub, 2);
+
+            match ($l['tasa_itbis']) {
+                TasaItbis::DIECIOCHO => $montoGravado18 = bcadd($montoGravado18, $sub, 2),
+                TasaItbis::DIECISEIS => $montoGravado16 = bcadd($montoGravado16, $sub, 2),
+                TasaItbis::CERO => $montoGravado0 = bcadd($montoGravado0, $sub, 2),
+                // Exento: cuenta en el subtotal y no lleva ITBIS (la tabla no desglosa exento).
+                // Sin este caso, devolver un exento reventaba con UnhandledMatchError.
+                TasaItbis::EXENTO => null,
+            };
+        }
+
+        $itbis18 = bcmul($montoGravado18, '0.18', 2);
+        $itbis16 = bcmul($montoGravado16, '0.16', 2);
+        $totalItbis = bcadd($itbis18, $itbis16, 2);
+
+        return [
+            'subtotal' => $subtotal,
+            'monto_gravado_18' => $montoGravado18,
+            'monto_gravado_16' => $montoGravado16,
+            'monto_gravado_0' => $montoGravado0,
+            'itbis_18' => $itbis18,
+            'itbis_16' => $itbis16,
+            'itbis' => $totalItbis,
+            'total' => bcadd($subtotal, $totalItbis, 2),
+        ];
+    }
+}

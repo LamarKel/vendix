@@ -1,0 +1,237 @@
+<?php
+
+namespace App\Filament\Resources\CompraResource\Pages;
+
+use App\Enums\TipoComprobante;
+use App\Exceptions\StockInsuficienteException;
+use App\Filament\Resources\CompraResource;
+use App\Models\Compra;
+use App\Models\OrdenCompra;
+use App\Services\CompraService;
+use App\Services\CostoPrecioService;
+use App\Support\MensajeError;
+use Filament\Actions\Action;
+use Filament\Facades\Filament;
+use Filament\Notifications\Notification;
+use Filament\Resources\Pages\CreateRecord;
+use Filament\Support\Exceptions\Halt;
+use Illuminate\Contracts\View\View;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Support\Str;
+use Livewire\Attributes\Url;
+use RuntimeException;
+
+class CreateCompra extends CreateRecord
+{
+    protected static string $resource = CompraResource::class;
+
+    /** ?orden={id}: viene de "Recibir mercancía" en Órdenes de Compra. */
+    #[Url(as: 'orden')]
+    public ?string $ordenId = null;
+
+    public function mount(): void
+    {
+        parent::mount();
+
+        if (blank($this->ordenId)) {
+            return;
+        }
+
+        // El id viene de la URL: solo órdenes de la empresa activa que admitan recepciones. Si no
+        // aplica, se avisa y queda el formulario vacío en vez de prellenar con datos ajenos.
+        $orden = OrdenCompra::query()
+            ->where('empresa_id', Filament::getTenant()->id)
+            ->with('detalles')
+            ->find($this->ordenId);
+
+        if ($orden === null || ! $orden->puedeRecibir()) {
+            Notification::make()->title('La orden de compra no existe o no admite recepciones.')->warning()->send();
+
+            return;
+        }
+
+        // Solo lo pendiente, al precio pactado en la orden. El usuario ajusta si llegó distinto.
+        $lineas = [];
+        foreach ($orden->detalles as $detalle) {
+            if (bccomp($detalle->cantidadPendiente(), '0', 4) <= 0) {
+                continue;
+            }
+
+            $lineas[(string) Str::uuid()] = [
+                'producto_id' => $detalle->producto_id,
+                'cantidad' => (float) $detalle->cantidadPendiente(),
+                'costo_unitario' => (float) $detalle->precio_unitario,
+            ];
+        }
+
+        $this->form->fill([
+            ...$this->data,
+            'orden_compra_id' => $orden->id,
+            'proveedor_id' => $orden->proveedor_id,
+            'lineas' => $lineas,
+        ]);
+    }
+
+    protected function getRedirectUrl(): string
+    {
+        return $this->getResource()::getUrl('index');
+    }
+
+    protected function getHeaderActions(): array
+    {
+        return [
+            Action::make('verListado')
+                ->label('Ver todas las compras')
+                ->icon('heroicon-o-list-bullet')
+                ->color('gray')
+                ->modalHeading('Compras registradas')
+                ->modalWidth('7xl')
+                ->modalSubmitAction(false)
+                ->modalCancelAction(false)
+                ->modalContent(fn () => view('filament.compras.listado-modal-content')),
+        ];
+    }
+
+    public function getFooter(): ?View
+    {
+        return view('filament.compras.create-footer-script');
+    }
+
+    protected function getCreatedNotificationTitle(): ?string
+    {
+        return 'Compra registrada exitosamente';
+    }
+
+    /**
+     * Toma los campos fijos de "Agregar producto" y los agrega como una nueva línea
+     * a la tabla de detalle, luego limpia esos campos para la siguiente captura.
+     * Se invoca al hacer clic en "Agregar" o al presionar Enter en el costo unitario.
+     */
+    public function agregarLinea(): void
+    {
+        if ($this->data['nueva_linea_por_peso'] ?? false) {
+            $this->agregarLineaPorPeso();
+
+            return;
+        }
+
+        $productoId = $this->data['nueva_linea_producto_id'] ?? null;
+        $cantidad = $this->data['nueva_linea_cantidad'] ?? null;
+        $costoUnitario = $this->data['nueva_linea_costo_unitario'] ?? null;
+
+        if (! $productoId || ! $cantidad || $costoUnitario === null || $costoUnitario === '') {
+            Notification::make()->title('Selecciona un producto e indica cantidad y costo.')->warning()->send();
+
+            return;
+        }
+
+        $lineas = $this->data['lineas'] ?? [];
+        $lineas[(string) Str::uuid()] = [
+            'producto_id' => $productoId,
+            'cantidad' => $cantidad,
+            'costo_unitario' => $costoUnitario,
+        ];
+
+        $this->data['lineas'] = $lineas;
+        $this->data['nueva_linea_producto_id'] = null;
+        $this->data['nueva_linea_cantidad'] = 1;
+        $this->data['nueva_linea_costo_unitario'] = null;
+    }
+
+    /**
+     * Compra por peso de un producto que se vende por libra o kilo: la línea entra con el peso
+     * como cantidad, lo pagado como total y el costo por libra que resulta de dividirlos. El
+     * envase no importa: el inventario queda en la unidad en que se vende.
+     */
+    private function agregarLineaPorPeso(): void
+    {
+        $producto = CompraResource::productoDeLaEmpresa($this->data['nueva_linea_producto_id'] ?? null);
+        $calculo = CompraResource::calcularCompraPorPeso(
+            $this->data['nueva_linea_peso'] ?? null,
+            $this->data['nueva_linea_total_pagado'] ?? null,
+        );
+
+        if ($producto === null || $calculo === null) {
+            Notification::make()->title('Selecciona un producto e indica el peso y el total pagado.')->warning()->send();
+
+            return;
+        }
+
+        $lineas = $this->data['lineas'] ?? [];
+        $lineas[(string) Str::uuid()] = [
+            'producto_id' => $producto->id,
+            'cantidad' => $calculo['cantidad'],
+            'costo_unitario' => $calculo['costo_unitario'],
+            'total' => $calculo['total'],
+        ];
+
+        $this->data['lineas'] = $lineas;
+        $this->data['nueva_linea_producto_id'] = null;
+        $this->data['nueva_linea_cantidad'] = 1;
+        $this->data['nueva_linea_costo_unitario'] = null;
+        $this->data['nueva_linea_por_peso'] = false;
+        $this->data['nueva_linea_peso'] = null;
+        $this->data['nueva_linea_total_pagado'] = null;
+    }
+
+    /**
+     * Delega la creación completa (cabecera + detalles + inventario) a CompraService,
+     * en vez del guardado Eloquent por defecto de Filament.
+     */
+    protected function handleRecordCreation(array $data): Model
+    {
+        try {
+            $compra = app(CompraService::class)->crear([
+                'proveedor_id' => $data['proveedor_id'],
+                'orden_compra_id' => $data['orden_compra_id'] ?? null,
+                'tipo_comprobante' => filled($data['tipo_comprobante'] ?? null) ? TipoComprobante::from($data['tipo_comprobante']) : null,
+                'ncf' => $data['ncf'] ?? null,
+                'fecha' => $data['fecha'],
+                'itbis_incluido' => $data['itbis_incluido'] ?? false,
+                'monto_total_factura' => $data['monto_total_factura'] ?? null,
+                'tipo_pago' => $data['tipo_pago'] ?? null,
+                'fecha_vencimiento' => $data['fecha_vencimiento'] ?? null,
+                'lineas' => $data['lineas'],
+            ], auth()->id(), Filament::getTenant());
+        } catch (RuntimeException|StockInsuficienteException $e) {
+            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+            throw new Halt;
+        }
+
+        $this->avisarPreciosSugeridos($compra);
+
+        return $compra;
+    }
+
+    /**
+     * Si la compra dejó productos con un precio sugerido distinto al actual (costo nuevo + % de
+     * ganancia), avisa con un botón a "Revisar precios". Persistente: el formulario redirige y el
+     * aviso tiene que seguir ahí.
+     */
+    private function avisarPreciosSugeridos(Compra $compra): void
+    {
+        if (! (auth()->user()?->can('productos.editar') ?? false)) {
+            return;
+        }
+
+        $cantidad = app(CostoPrecioService::class)->sugerenciasParaCompra($compra)->count();
+
+        if ($cantidad === 0) {
+            return;
+        }
+
+        Notification::make()
+            ->title($cantidad === 1 ? '1 producto tiene un precio sugerido nuevo' : "{$cantidad} productos tienen un precio sugerido nuevo")
+            ->body('El costo cambió con esta compra. Revisa los precios antes de seguir vendiendo.')
+            ->warning()
+            ->persistent()
+            ->actions([
+                Action::make('revisarPrecios')
+                    ->label('Revisar precios')
+                    ->button()
+                    ->url(CompraResource::getUrl('view', ['record' => $compra])),
+            ])
+            ->send();
+    }
+}

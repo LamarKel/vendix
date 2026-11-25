@@ -1,0 +1,793 @@
+<?php
+
+namespace App\Filament\Resources;
+
+use App\Enums\EstadoCompra;
+use App\Enums\EstadoDevolucion;
+use App\Enums\Modulo;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoPago;
+use App\Enums\TipoProducto;
+use App\Enums\TipoProveedor;
+use App\Enums\TipoVenta;
+use App\Filament\Concerns\RestringidoPorModulo;
+use App\Filament\Resources\CompraResource\Pages;
+use App\Models\Compra;
+use App\Models\DetalleCompra;
+use App\Models\OrdenCompra;
+use App\Models\Producto;
+use App\Models\Proveedor;
+use App\Services\CompraService;
+use App\Services\DgiiRncService;
+use App\Services\ReporteService;
+use App\Support\MensajeError;
+use Filament\Actions\Action;
+use Filament\Actions\ViewAction;
+use Filament\Facades\Filament;
+use Filament\Forms\Components\DatePicker;
+use Filament\Forms\Components\DateTimePicker;
+use Filament\Forms\Components\Hidden;
+use Filament\Forms\Components\Repeater;
+use Filament\Forms\Components\Repeater\TableColumn;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\Textarea;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
+use Filament\Infolists\Components\RepeatableEntry;
+use Filament\Infolists\Components\RepeatableEntry\TableColumn as InfolistTableColumn;
+use Filament\Infolists\Components\TextEntry;
+use Filament\Notifications\Notification;
+use Filament\Resources\Resource;
+use Filament\Schemas\Components\Actions;
+use Filament\Schemas\Components\Section;
+use Filament\Schemas\Components\Utilities\Get;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Filters\Filter;
+use Filament\Tables\Filters\SelectFilter;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Validation\Rules\Unique;
+use RuntimeException;
+
+class CompraResource extends Resource
+{
+    use RestringidoPorModulo;
+
+    protected static ?string $model = Compra::class;
+
+    public static function modulo(): Modulo
+    {
+        return Modulo::COMPRAS;
+    }
+
+    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-shopping-cart';
+
+    protected static ?string $navigationLabel = 'Compras';
+
+    protected static ?string $modelLabel = 'Compra';
+
+    protected static ?string $pluralModelLabel = 'Compras';
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Operaciones';
+
+    protected static ?int $navigationSort = 4;
+
+    public static function form(Schema $schema): Schema
+    {
+        return $schema->columns(1)->components([
+            Section::make('Datos de la factura de compra')
+                ->columnSpanFull()
+                ->columns(3)
+                ->schema([
+                    // Lo llena CreateCompra::mount() al venir de "Recibir mercancía" en Órdenes de
+                    // Compra. CompraService revalida que la orden sea de la empresa, del proveedor
+                    // y admita recepciones.
+                    Hidden::make('orden_compra_id'),
+
+                    Select::make('proveedor_id')
+                        ->label('Proveedor')
+                        // Scope manual obligatorio — Filament NO aplica tenant scope dentro de
+                        // ->relationship(), ni siquiera dentro de su propio Resource.
+                        ->relationship('proveedor', 'nombre', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()->id))
+                        ->searchable()
+                        ->preload()
+                        ->live()
+                        ->required()
+                        // Al recibir una orden el proveedor es el de la orden: dehydrated() porque
+                        // un campo disabled no viaja en el submit por defecto.
+                        ->disabled(fn (Get $get): bool => filled($get('orden_compra_id')))
+                        ->dehydrated()
+                        ->helperText(fn (Get $get): ?string => filled($get('orden_compra_id'))
+                            ? 'Recibiendo la orden de compra '.(OrdenCompra::where('empresa_id', Filament::getTenant()->id)->find($get('orden_compra_id'))?->numero ?? '').'. Ajusta las cantidades si llegó distinto y pon el NCF de la factura.'
+                            : null)
+                        ->createOptionForm([
+                            TextInput::make('rnc')
+                                ->label('RNC / Cédula')
+                                ->required()
+                                ->unique(table: 'proveedores', ignoreRecord: true, modifyRuleUsing: fn ($rule) => $rule->where('empresa_id', Filament::getTenant()->id))
+                                ->maxLength(11)
+                                ->minLength(9)
+                                // Texto, no número: un campo numérico quita los ceros a la izquierda y una cédula
+                                // 001-1234567-8 se guardaba como 112345678. Los dígitos los exige el regex.
+                                ->inputMode('numeric')
+                                ->regex('/^\d{9}(\d{2})?$/')
+                                ->validationMessages(['regex' => 'Debe tener 9 dígitos (RNC) u 11 (Cédula).'])
+                                ->suffixAction(
+                                    Action::make('buscar_dgii')
+                                        ->label('Buscar en DGII')
+                                        ->icon('heroicon-o-magnifying-glass')
+                                        ->action(function (Get $get, callable $set) {
+                                            $rnc = preg_replace('/[^0-9]/', '', $get('rnc') ?? '');
+
+                                            if (! $rnc) {
+                                                Notification::make()->title('Ingresa un RNC o Cédula primero.')->warning()->send();
+
+                                                return;
+                                            }
+
+                                            $service = app(DgiiRncService::class);
+
+                                            if (! $service->esRncValido($rnc)) {
+                                                Notification::make()->title('RNC inválido')->danger()->send();
+
+                                                return;
+                                            }
+
+                                            $datos = $service->consultarRnc($rnc);
+
+                                            if (! $datos) {
+                                                Notification::make()->title('No encontrado en la DGII')->warning()->send();
+
+                                                return;
+                                            }
+
+                                            $set('rnc', $datos['rnc']);
+                                            $set('nombre', $datos['nombre']);
+                                            $set('estado', $datos['estado']);
+
+                                            Notification::make()->title('¡Datos cargados!')->success()->send();
+                                        })
+                                ),
+                            TextInput::make('nombre')
+                                ->label('Nombre / Razón Social')
+                                ->required()
+                                ->maxLength(255),
+                            Select::make('tipo')
+                                ->label('Tipo de proveedor')
+                                ->options([
+                                    TipoProveedor::FORMAL->value => TipoProveedor::FORMAL->etiqueta(),
+                                    TipoProveedor::INFORMAL->value => TipoProveedor::INFORMAL->etiqueta(),
+                                ])
+                                ->default(TipoProveedor::FORMAL->value)
+                                ->required(),
+                        ])
+                        ->createOptionAction(fn (Action $action) => $action->modalHeading('Crear proveedor')),
+
+                    TextEntry::make('proveedor_rnc_preview')
+                        ->label('RNC / Cédula')
+                        ->state(function (Get $get) {
+                            $proveedor = Proveedor::find($get('proveedor_id'));
+
+                            return $proveedor?->rnc ?? '—';
+                        }),
+
+                    DateTimePicker::make('fecha')
+                        ->label('Fecha de la factura')
+                        ->default(now())
+                        ->required(),
+
+                    TextEntry::make('fecha_registro_preview')
+                        ->label('Fecha de registro')
+                        ->state(now()->format('d/m/Y H:i')),
+
+                    Select::make('tipo_comprobante')
+                        ->label('Tipo de comprobante')
+                        ->options([
+                            TipoComprobante::COMPRAS->value => TipoComprobante::COMPRAS->etiqueta(),
+                            TipoComprobante::GASTOS_MENORES->value => TipoComprobante::GASTOS_MENORES->etiqueta(),
+                        ])
+                        ->default(TipoComprobante::COMPRAS->value)
+                        ->visible(fn (Get $get) => ! self::proveedorEsInformal($get))
+                        ->required(fn (Get $get) => ! self::proveedorEsInformal($get)),
+
+                    TextInput::make('ncf')
+                        ->label('NCF del proveedor')
+                        ->helperText('Comprobante fiscal recibido del proveedor. Dejar vacío si no aplica.')
+                        ->maxLength(13)
+                        ->regex('/^[A-Z0-9]{11,13}$/')
+                        ->unique(
+                            table: 'compras',
+                            column: 'ncf',
+                            ignoreRecord: true,
+                            modifyRuleUsing: fn (Unique $rule, Get $get) => $rule->where('proveedor_id', $get('proveedor_id')),
+                        )
+                        ->validationMessages([
+                            'regex' => 'El NCF debe tener entre 11 y 13 caracteres alfanuméricos en mayúsculas.',
+                            'unique' => 'Ya existe una compra con este NCF para el proveedor seleccionado.',
+                        ])
+                        ->visible(fn (Get $get) => ! self::proveedorEsInformal($get)),
+
+                    TextEntry::make('ncf_auto_preview')
+                        ->label('NCF')
+                        ->visible(fn (Get $get) => self::proveedorEsInformal($get))
+                        ->state('Se generará automáticamente al guardar (proveedor informal).'),
+
+                    Toggle::make('itbis_incluido')
+                        ->label('Los costos digitados ya incluyen el ITBIS')
+                        ->live()
+                        ->default(false)
+                        ->columnSpanFull(),
+
+                    Select::make('tipo_pago')
+                        ->label('Condición de pago')
+                        ->options([
+                            TipoPago::CONTADO->value => TipoPago::CONTADO->etiqueta(),
+                            TipoPago::CREDITO->value => TipoPago::CREDITO->etiqueta(),
+                        ])
+                        ->default(TipoPago::CONTADO->value)
+                        ->live()
+                        ->required(),
+
+                    DatePicker::make('fecha_vencimiento')
+                        ->label('Fecha de vencimiento')
+                        ->default(now()->addDays(30))
+                        ->visible(fn (Get $get) => (int) $get('tipo_pago') === TipoPago::CREDITO->value)
+                        ->required(fn (Get $get) => (int) $get('tipo_pago') === TipoPago::CREDITO->value),
+
+                    // ── Campos para el Reporte 606 ──
+                    Select::make('tipo_bienes_servicios_606')
+                        ->label('Tipo bienes/servicios (606)')
+                        ->options(ReporteService::TIPO_BIENES_SERVICIOS_606)
+                        ->default('09')
+                        ->helperText('Clasificación DGII para el Formato 606'),
+
+                    Select::make('forma_pago_606')
+                        ->label('Forma de pago (606)')
+                        ->options(ReporteService::FORMA_PAGO_606)
+                        ->default('01')
+                        ->helperText('Catálogo DGII de forma de pago'),
+
+                    TextInput::make('monto_total_factura')
+                        ->label('Monto total de la factura')
+                        ->helperText('Total impreso en la factura física del proveedor, para cuadrar contra el detalle digitado abajo.')
+                        ->numeric()
+                        ->prefix('RD$')
+                        ->minValue(0)
+                        ->required()
+                        ->live(onBlur: true)
+                        ->hintColor('warning')
+                        ->hint(function (Get $get) {
+                            $montoFactura = $get('monto_total_factura');
+
+                            if (! filled($montoFactura)) {
+                                return null;
+                            }
+
+                            $lineas = collect($get('lineas') ?? [])
+                                ->filter(fn ($l) => filled($l['producto_id'] ?? null) && filled($l['cantidad'] ?? null) && filled($l['costo_unitario'] ?? null))
+                                ->filter(fn ($l) => Producto::whereKey($l['producto_id'])->exists())
+                                ->values()
+                                ->all();
+
+                            if (empty($lineas)) {
+                                return null;
+                            }
+
+                            $service = app(CompraService::class);
+                            $calc = $service->calcularLineas($lineas, (bool) $get('itbis_incluido'), Filament::getTenant());
+                            $totales = $service->calcularTotales($calc);
+
+                            $diferencia = round((float) $montoFactura - $totales['total'], 2);
+
+                            if (abs($diferencia) < 0.01) {
+                                return null;
+                            }
+
+                            return sprintf(
+                                'No coincide con el total calculado (RD$%s). Diferencia: RD$%s',
+                                number_format($totales['total'], 2),
+                                number_format($diferencia, 2),
+                            );
+                        })
+                        ->columnSpanFull(),
+                ]),
+
+            Section::make('Agregar producto')
+                ->columnSpanFull()
+                ->columns(4)
+                ->schema([
+                    Select::make('nueva_linea_producto_id')
+                        ->label('Producto')
+                        ->hiddenLabel()
+                        ->placeholder('Selecciona un producto…')
+                        ->actionSchemaModel(Producto::class)
+                        // Scope manual obligatorio — Filament NO aplica tenant scope en queries
+                        // dentro de options().
+                        ->options(fn () => Producto::query()
+                            ->where('empresa_id', Filament::getTenant()->id)
+                            ->activos()
+                            ->pluck('nombre', 'id'))
+                        ->searchable()
+                        ->preload()
+                        ->live()
+                        ->afterStateUpdated(function ($state, callable $set) {
+                            $producto = $state ? static::productoDeLaEmpresa($state) : null;
+                            $set('nueva_linea_costo_unitario', $producto?->costo ?? 0);
+                            // Lo que se vende por peso se compra pesándolo: se digitan el peso y lo
+                            // pagado, y la línea entra en libras con el costo por libra calculado.
+                            $set('nueva_linea_por_peso', $producto?->tipo_venta === TipoVenta::PESADO);
+                            $set('nueva_linea_peso', null);
+                            $set('nueva_linea_total_pagado', null);
+                        })
+                        ->createOptionUsing(fn (array $data) => Producto::create($data)->getKey())
+                        ->createOptionForm([
+                            TextInput::make('codigo')
+                                ->label('Código')
+                                ->required()
+                                ->unique(table: 'productos', ignoreRecord: true, modifyRuleUsing: fn ($rule) => $rule->where('empresa_id', Filament::getTenant()->id))
+                                ->maxLength(50),
+                            TextInput::make('nombre')
+                                ->label('Nombre')
+                                ->required()
+                                ->maxLength(255),
+                            Select::make('tipo')
+                                ->label('Tipo')
+                                ->options([
+                                    TipoProducto::PRODUCTO->value => 'Producto',
+                                    TipoProducto::SERVICIO->value => 'Servicio',
+                                ])
+                                ->default(TipoProducto::PRODUCTO->value)
+                                ->required(),
+                            TextInput::make('costo')
+                                ->label('Costo')
+                                ->numeric()
+                                ->prefix('RD$')
+                                ->minValue(0)
+                                ->default(0),
+                            TextInput::make('precio')
+                                ->label('Precio de venta')
+                                ->numeric()
+                                ->prefix('RD$')
+                                ->required()
+                                ->minValue(0)
+                                ->default(0),
+                            Select::make('tasa_itbis')
+                                ->label('Tasa ITBIS')
+                                ->options([
+                                    TasaItbis::DIECIOCHO->value => '18 %',
+                                    TasaItbis::DIECISEIS->value => '16 %',
+                                    TasaItbis::CERO->value => '0 %',
+                                    TasaItbis::EXENTO->value => 'Exento',
+                                ])
+                                ->default(TasaItbis::DIECIOCHO->value)
+                                ->required(),
+                            Toggle::make('controla_stock')
+                                ->label('Controla stock')
+                                ->default(true),
+                        ])
+                        ->createOptionAction(fn (Action $action) => $action->modalHeading('Crear producto')),
+
+                    TextInput::make('nueva_linea_cantidad')
+                        ->label('Cantidad')
+                        ->hiddenLabel()
+                        ->placeholder('Cantidad')
+                        ->numeric()
+                        ->minValue(0.001)
+                        ->default(1)
+                        ->hidden(fn (Get $get): bool => (bool) $get('nueva_linea_por_peso')),
+
+                    TextInput::make('nueva_linea_costo_unitario')
+                        ->label('Costo unitario')
+                        ->hiddenLabel()
+                        ->placeholder('Costo unitario')
+                        ->numeric()
+                        ->prefix('RD$')
+                        ->minValue(0)
+                        ->hidden(fn (Get $get): bool => (bool) $get('nueva_linea_por_peso'))
+                        ->extraInputAttributes(['wire:keydown.enter.prevent' => 'agregarLinea']),
+
+                    // ── Compra por peso (productos que se venden por libra/kilo) ────────
+                    // Se pesa la mercancía (el envase no importa) y se digita lo pagado: el
+                    // costo por libra lo calcula el sistema.
+                    TextInput::make('nueva_linea_peso')
+                        ->label(fn (Get $get): string => 'Peso ('.static::unidadPeso(static::productoDeLaEmpresa($get('nueva_linea_producto_id'))).')')
+                        ->helperText('Lo que pesó la mercancía. Es lo que entra al inventario.')
+                        ->numeric()
+                        ->minValue(0.001)
+                        ->live(onBlur: true)
+                        ->visible(fn (Get $get): bool => (bool) $get('nueva_linea_por_peso')),
+
+                    TextInput::make('nueva_linea_total_pagado')
+                        ->label('Total pagado')
+                        ->numeric()
+                        ->prefix('RD$')
+                        ->minValue(0)
+                        ->live(onBlur: true)
+                        ->visible(fn (Get $get): bool => (bool) $get('nueva_linea_por_peso'))
+                        ->extraInputAttributes(['wire:keydown.enter.prevent' => 'agregarLinea']),
+
+                    TextEntry::make('nueva_linea_resumen_peso')
+                        ->hiddenLabel()
+                        ->columnSpan(2)
+                        ->visible(fn (Get $get): bool => (bool) $get('nueva_linea_por_peso'))
+                        ->state(function (Get $get): string {
+                            $calculo = static::calcularCompraPorPeso($get('nueva_linea_peso'), $get('nueva_linea_total_pagado'));
+                            $unidad = static::unidadPeso(static::productoDeLaEmpresa($get('nueva_linea_producto_id')));
+
+                            return $calculo === null
+                                ? 'Digita el peso y el total pagado.'
+                                : sprintf('Costo por %s: RD$%s', $unidad, number_format((float) $calculo['costo_unitario'], 2));
+                        }),
+
+                    Toggle::make('nueva_linea_por_peso')
+                        ->label('Digitar peso y total pagado')
+                        ->default(false)
+                        ->live()
+                        ->visible(fn (Get $get): bool => static::productoDeLaEmpresa($get('nueva_linea_producto_id'))?->tipo_venta === TipoVenta::PESADO),
+
+                    Actions::make([
+                        Action::make('agregarLinea')
+                            ->label('Agregar')
+                            ->icon('heroicon-o-plus')
+                            ->action(function ($livewire) {
+                                $livewire->agregarLinea();
+                            }),
+                    ]),
+                ]),
+
+            Repeater::make('lineas')
+                ->label('Detalle de productos')
+                ->table([
+                    TableColumn::make('Producto')->markAsRequired(),
+                    TableColumn::make('Cantidad')->markAsRequired(),
+                    TableColumn::make('Costo unitario')->markAsRequired(),
+                    TableColumn::make('ITBIS'),
+                ])
+                ->schema([
+                    // Hidden porque los TextEntry de abajo son solo de vista (Entry::isDehydrated()
+                    // siempre es false): sin estos campos el valor real no viaja al $data del submit.
+                    Hidden::make('producto_id'),
+                    Hidden::make('cantidad'),
+                    Hidden::make('costo_unitario'),
+                    // Compra por peso: importe pagado, para que el subtotal cuadre con lo pagado
+                    // aunque el costo por libra se redondee.
+                    Hidden::make('total'),
+
+                    TextEntry::make('producto_id')
+                        ->hiddenLabel()
+                        ->formatStateUsing(fn ($state) => Producto::find($state)?->nombre ?? '—'),
+
+                    TextEntry::make('cantidad')
+                        ->hiddenLabel()
+                        ->formatStateUsing(function ($state, Get $get): string {
+                            $producto = static::productoDeLaEmpresa($get('producto_id'));
+                            $cantidad = number_format((float) $state, 2);
+
+                            return $producto?->tipo_venta === TipoVenta::PESADO
+                                ? $cantidad.' '.static::unidadPeso($producto)
+                                : $cantidad;
+                        }),
+
+                    TextEntry::make('costo_unitario')
+                        ->hiddenLabel()
+                        ->money('DOP'),
+
+                    TextEntry::make('tasa_itbis_preview')
+                        ->hiddenLabel()
+                        ->state(function (Get $get) {
+                            $producto = Producto::find($get('producto_id'));
+
+                            return $producto ? $producto->tasa_itbis->porcentaje().' %' : '—';
+                        }),
+                ])
+                ->addable(false)
+                ->reorderable(false)
+                ->minItems(1)
+                ->required()
+                ->columnSpanFull(),
+
+            Section::make('Totales (estimado)')
+                ->columnSpanFull()
+                ->schema([
+                    TextEntry::make('resumen_totales')
+                        ->hiddenLabel()
+                        ->state(function (Get $get) {
+                            $lineas = collect($get('lineas') ?? [])
+                                ->filter(fn ($l) => filled($l['producto_id'] ?? null) && filled($l['cantidad'] ?? null) && filled($l['costo_unitario'] ?? null))
+                                ->filter(fn ($l) => Producto::whereKey($l['producto_id'])->exists())
+                                ->values()
+                                ->all();
+
+                            if (empty($lineas)) {
+                                return 'Agrega al menos una línea con producto, cantidad y costo.';
+                            }
+
+                            $service = app(CompraService::class);
+                            $calc = $service->calcularLineas($lineas, (bool) $get('itbis_incluido'), Filament::getTenant());
+                            $totales = $service->calcularTotales($calc);
+
+                            return sprintf(
+                                'Subtotal: RD$%s   |   ITBIS: RD$%s   |   Total: RD$%s',
+                                number_format($totales['subtotal'], 2),
+                                number_format($totales['itbis'], 2),
+                                number_format($totales['total'], 2),
+                            );
+                        }),
+                ]),
+        ]);
+    }
+
+    /**
+     * Compra por peso: el peso real es la cantidad que entra al inventario y el costo por unidad
+     * de peso sale de total pagado ÷ peso. null si falta algún dato o no es válido.
+     *
+     * @return array{total: string, cantidad: string, costo_unitario: string}|null
+     */
+    public static function calcularCompraPorPeso(mixed $peso, mixed $totalPagado): ?array
+    {
+        if (! is_numeric($peso) || ! is_numeric($totalPagado)) {
+            return null;
+        }
+
+        $cantidad = bcadd(number_format((float) $peso, 3, '.', ''), '0', 3);
+        $total = bcadd(number_format((float) $totalPagado, 2, '.', ''), '0', 2);
+
+        if (bccomp($cantidad, '0', 3) <= 0 || bccomp($total, '0', 2) < 0) {
+            return null;
+        }
+
+        return [
+            'total' => $total,
+            'cantidad' => $cantidad,
+            'costo_unitario' => bcadd(bcdiv($total, $cantidad, 4), '0.005', 2),
+        ];
+    }
+
+    /** Producto de la empresa activa (los ids vienen del formulario). */
+    public static function productoDeLaEmpresa(mixed $id): ?Producto
+    {
+        return filled($id)
+            ? Producto::query()->where('empresa_id', Filament::getTenant()->id)->find($id)
+            : null;
+    }
+
+    /** Abreviatura de la unidad de peso del producto: lb, kg u otra. */
+    public static function unidadPeso(?Producto $producto): string
+    {
+        return match ($producto?->unidad_base) {
+            'libra' => 'lb',
+            'kilogramo' => 'kg',
+            null => 'lb',
+            default => (string) $producto->unidad_base,
+        };
+    }
+
+    public static function infolist(Schema $schema): Schema
+    {
+        return $schema->components([
+            Section::make('Datos de la compra')
+                ->columnSpanFull()
+                ->columns(3)
+                ->schema([
+                    TextEntry::make('proveedor.nombre')->label('Proveedor'),
+                    TextEntry::make('ncf')->label('NCF')->placeholder('—'),
+                    TextEntry::make('fecha')->label('Fecha')->dateTime('d/m/Y H:i'),
+                    TextEntry::make('estado')->label('Estado')->badge()
+                        ->formatStateUsing(fn (EstadoCompra $state) => match ($state) {
+                            EstadoCompra::REGISTRADA => 'Registrada',
+                            EstadoCompra::ANULADA => 'Anulada',
+                        })
+                        ->color(fn (EstadoCompra $state) => $state === EstadoCompra::ANULADA ? 'danger' : 'success'),
+                    TextEntry::make('ordenCompra.numero')->label('Orden de compra')
+                        ->url(fn (Compra $record) => $record->orden_compra_id ? OrdenCompraResource::getUrl('view', ['record' => $record->orden_compra_id]) : null)
+                        ->visible(fn (Compra $record) => $record->orden_compra_id !== null),
+                    // Historial: compras que recibieron un pedido antes de unificarlo con las órdenes.
+                    TextEntry::make('pedido_compra_id')->label('Pedido de compra (anterior)')
+                        ->formatStateUsing(fn ($state) => "Pedido #{$state}")
+                        ->visible(fn (Compra $record) => $record->pedido_compra_id !== null),
+                    TextEntry::make('subtotal')->label('Subtotal')->money('DOP'),
+                    TextEntry::make('itbis')->label('ITBIS')->money('DOP'),
+                    TextEntry::make('total')->label('Total')->money('DOP'),
+                    TextEntry::make('tipo_pago')->label('Condición de pago')
+                        ->formatStateUsing(fn (TipoPago $state) => $state->etiqueta()),
+                    TextEntry::make('fecha_vencimiento')->label('Vence')->date('d/m/Y')
+                        ->placeholder('—')
+                        ->visible(fn (Compra $record) => $record->esACredito()),
+                    TextEntry::make('cuentaPorPagar.montoPendiente')
+                        ->label('Pendiente por pagar')
+                        ->state(fn (Compra $record) => $record->cuentaPorPagar?->montoPendiente())
+                        ->money('DOP')
+                        ->visible(fn (Compra $record) => $record->esACredito() && $record->cuentaPorPagar !== null),
+                    TextEntry::make('monto_total_factura')
+                        ->label('Monto total de la factura')
+                        ->money('DOP')
+                        ->placeholder('—')
+                        ->color(fn (Compra $record) => $record->monto_total_factura !== null
+                            && abs((float) $record->monto_total_factura - (float) $record->total) >= 0.01
+                                ? 'warning'
+                                : null)
+                        ->helperText(fn (Compra $record) => $record->monto_total_factura !== null
+                            && abs((float) $record->monto_total_factura - (float) $record->total) >= 0.01
+                                ? 'No coincide con el total calculado del sistema.'
+                                : null),
+                    TextEntry::make('motivo_anulacion')->label('Motivo de anulación')->placeholder('—')
+                        ->visible(fn (Compra $record) => $record->estaAnulada()),
+                ]),
+
+            RepeatableEntry::make('detalles')
+                ->label('Detalle de productos')
+                ->table([
+                    InfolistTableColumn::make('Producto'),
+                    InfolistTableColumn::make('Cantidad'),
+                    InfolistTableColumn::make('Costo unitario'),
+                    InfolistTableColumn::make('ITBIS'),
+                    InfolistTableColumn::make('Subtotal'),
+                    InfolistTableColumn::make('Devuelto'),
+                ])
+                ->schema([
+                    TextEntry::make('producto.nombre')->hiddenLabel(),
+                    TextEntry::make('cantidad')->hiddenLabel()->numeric(decimalPlaces: 2),
+                    TextEntry::make('costo_unitario')->hiddenLabel()->money('DOP'),
+                    TextEntry::make('itbis_monto')->hiddenLabel()->money('DOP'),
+                    TextEntry::make('subtotal')->hiddenLabel()->money('DOP'),
+                    TextEntry::make('devuelto_preview')
+                        ->hiddenLabel()
+                        ->state(fn (DetalleCompra $record) => $record->cantidadDevuelta() > 0
+                            ? number_format($record->cantidadDevuelta(), 2)
+                            : '—'),
+                ])
+                ->columnSpanFull(),
+
+            Section::make('Devoluciones registradas')
+                ->columnSpanFull()
+                ->visible(fn (Compra $record) => $record->devoluciones()->exists())
+                ->schema([
+                    RepeatableEntry::make('devoluciones')
+                        ->hiddenLabel()
+                        ->table([
+                            InfolistTableColumn::make('Fecha'),
+                            InfolistTableColumn::make('Motivo'),
+                            InfolistTableColumn::make('Total'),
+                            InfolistTableColumn::make('Estado'),
+                        ])
+                        ->schema([
+                            TextEntry::make('fecha')->hiddenLabel()->dateTime('d/m/Y H:i'),
+                            TextEntry::make('motivo')->hiddenLabel(),
+                            TextEntry::make('total')->hiddenLabel()->money('DOP'),
+                            TextEntry::make('estado')->hiddenLabel()->badge()
+                                ->formatStateUsing(fn (EstadoDevolucion $state) => match ($state) {
+                                    EstadoDevolucion::REGISTRADA => 'Registrada',
+                                    EstadoDevolucion::ANULADA => 'Anulada',
+                                })
+                                ->color(fn (EstadoDevolucion $state) => $state === EstadoDevolucion::ANULADA ? 'danger' : 'success'),
+                        ]),
+                ]),
+        ]);
+    }
+
+    public static function getEloquentQuery(): Builder
+    {
+        return parent::getEloquentQuery()->with(['proveedor', 'user']);
+    }
+
+    public static function table(Table $table): Table
+    {
+        return $table
+            ->columns([
+                TextColumn::make('proveedor.nombre')
+                    ->label('Proveedor')
+                    ->searchable()
+                    ->sortable(),
+
+                TextColumn::make('ncf')
+                    ->label('NCF')
+                    ->placeholder('—')
+                    ->searchable(),
+
+                TextColumn::make('tipo_comprobante')
+                    ->label('Tipo')
+                    ->badge()
+                    ->formatStateUsing(fn (TipoComprobante $state) => $state->etiqueta())
+                    ->toggleable(isToggledHiddenByDefault: true),
+
+                TextColumn::make('fecha')
+                    ->label('Fecha')
+                    ->dateTime('d/m/Y')
+                    ->sortable(),
+
+                TextColumn::make('total')
+                    ->label('Total')
+                    ->money('DOP')
+                    ->alignEnd()
+                    ->sortable(),
+
+                TextColumn::make('estado')
+                    ->label('Estado')
+                    ->badge()
+                    ->formatStateUsing(fn (EstadoCompra $state) => match ($state) {
+                        EstadoCompra::REGISTRADA => 'Registrada',
+                        EstadoCompra::ANULADA => 'Anulada',
+                    })
+                    ->color(fn (EstadoCompra $state) => $state === EstadoCompra::ANULADA ? 'danger' : 'success'),
+
+                TextColumn::make('user.name')
+                    ->label('Registrada por')
+                    ->placeholder('—')
+                    ->toggleable(isToggledHiddenByDefault: true),
+            ])
+            ->filters([
+                SelectFilter::make('proveedor_id')
+                    ->label('Proveedor')
+                    // Scope manual obligatorio — Filament NO aplica tenant scope dentro de
+                    // ->relationship(), ni siquiera dentro de su propio Resource.
+                    ->relationship('proveedor', 'nombre', modifyQueryUsing: fn (Builder $query) => $query->where('empresa_id', Filament::getTenant()->id))
+                    ->searchable()
+                    ->preload(),
+
+                SelectFilter::make('estado')
+                    ->label('Estado')
+                    ->options([
+                        EstadoCompra::REGISTRADA->value => 'Registrada',
+                        EstadoCompra::ANULADA->value => 'Anulada',
+                    ]),
+
+                Filter::make('fecha')
+                    ->schema([
+                        DatePicker::make('desde')->label('Desde'),
+                        DatePicker::make('hasta')->label('Hasta'),
+                    ])
+                    ->query(function (Builder $query, array $data): Builder {
+                        return $query
+                            ->when($data['desde'] ?? null, fn (Builder $q, $desde) => $q->whereDate('fecha', '>=', $desde))
+                            ->when($data['hasta'] ?? null, fn (Builder $q, $hasta) => $q->whereDate('fecha', '<=', $hasta));
+                    }),
+            ])
+            ->recordActions([
+                ViewAction::make(),
+
+                Action::make('anular')
+                    ->label('Anular')
+                    ->icon('heroicon-o-x-circle')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->visible(fn (Compra $record): bool => ! $record->estaAnulada() && (auth()->user()?->can('compras.anular') ?? false))
+                    ->schema([
+                        Textarea::make('motivo')
+                            ->label('Motivo de anulación')
+                            ->required()
+                            ->rows(2),
+                    ])
+                    ->action(function (Compra $record, array $data): void {
+                        try {
+                            app(CompraService::class)->anular($record, $data['motivo'], auth()->id());
+                        } catch (RuntimeException $e) {
+                            Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                            return;
+                        }
+
+                        Notification::make()->title('Compra anulada')->success()->send();
+                    }),
+            ])
+            ->searchable(false)
+            ->defaultSort('fecha', 'desc');
+    }
+
+    private static function proveedorEsInformal(Get $get): bool
+    {
+        $proveedorId = $get('proveedor_id');
+
+        return $proveedorId ? (Proveedor::find($proveedorId)?->esInformal() ?? false) : false;
+    }
+
+    public static function getPages(): array
+    {
+        return [
+            'index' => Pages\CreateCompra::route('/'),
+            'create' => Pages\CreateCompra::route('/create'),
+            'view' => Pages\ViewCompra::route('/{record}'),
+        ];
+    }
+}

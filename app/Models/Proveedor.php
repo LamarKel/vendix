@@ -1,0 +1,82 @@
+<?php
+
+namespace App\Models;
+
+use App\Enums\TipoProveedor;
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
+use Spatie\Activitylog\LogOptions;
+use Spatie\Activitylog\Traits\LogsActivity;
+
+class Proveedor extends Model
+{
+    use HasFactory;
+    use LogsActivity;
+
+    protected $table = 'proveedores';
+
+    protected $fillable = [
+        'empresa_id',
+        'rnc',
+        'tipo',
+        'nombre',
+        'nombre_comercial',
+        'actividad_economica',
+        'telefono',
+        'email',
+        'direccion',
+        'estado',
+        'activo',
+    ];
+
+    protected $casts = [
+        'tipo' => TipoProveedor::class,
+        'activo' => 'boolean',
+    ];
+
+    public function scopeActivos(Builder $query): Builder
+    {
+        return $query->where('activo', true);
+    }
+
+    public function getActivitylogOptions(): LogOptions
+    {
+        return LogOptions::defaults()
+            ->logOnly(['rnc', 'nombre', 'nombre_comercial', 'actividad_economica', 'telefono', 'email', 'direccion', 'estado', 'activo'])
+            ->logOnlyDirty()
+            ->dontSubmitEmptyLogs()
+            ->useLogName('Proveedores');
+    }
+
+    public function empresa(): BelongsTo
+    {
+        return $this->belongsTo(Empresa::class);
+    }
+
+    public function esInformal(): bool
+    {
+        return $this->tipo === TipoProveedor::INFORMAL;
+    }
+
+    public function compras(): HasMany
+    {
+        return $this->hasMany(Compra::class);
+    }
+
+    public function pedidosCompra(): HasMany
+    {
+        return $this->hasMany(PedidoCompra::class);
+    }
+
+    public function productos(): BelongsToMany
+    {
+        return $this->belongsToMany(Producto::class, 'producto_proveedor')
+            ->using(ProductoProveedor::class)
+            ->withPivot(['es_principal', 'costo_referencia', 'codigo_proveedor'])
+            ->withTimestamps();
+    }
+}

@@ -1,0 +1,151 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services;
+
+use App\Models\Empresa;
+use App\Models\Role;
+use App\Models\User;
+use App\Support\Permisos;
+use Illuminate\Database\UniqueConstraintViolationException;
+use Spatie\Permission\PermissionRegistrar;
+
+/**
+ * Los roles son por empresa (spatie/laravel-permission con 'teams' => true, empresa_id como
+ * team_foreign_key): no hay un "Vendedor" global, cada empresa tiene el suyo. Este service
+ * concentra la siembra de los roles base y la asignación del primer Administrador, para no
+ * repetir el manejo del contexto de permisos (setPermissionsTeamId) en cada sitio que da de
+ * alta una empresa (el seeder principal y EmpresaResource).
+ */
+class RolesEmpresaService
+{
+    public function sembrarRolesBase(Empresa $empresa): void
+    {
+        $this->dentroDelContextoDe($empresa, function () use ($empresa) {
+            $administrador = $this->rolSeguro([
+                'empresa_id' => $empresa->id,
+                'name' => 'Administrador',
+                'guard_name' => 'web',
+            ]);
+            // gestionar_arqueo_caja ahora está en Permisos::catalogo() (Ventas), así que
+            // Permisos::todos() ya lo incluye — no hace falta agregarlo a mano.
+            $administrador->syncPermissions(Permisos::todos());
+
+            $vendedor = $this->rolSeguro([
+                'empresa_id' => $empresa->id,
+                'name' => 'Vendedor',
+                'guard_name' => 'web',
+            ]);
+            $vendedor->syncPermissions([
+                // Vendedor conserva ambas pantallas: Caja para el día a día rápido, y
+                // Facturación por si necesita emitir un comprobante con más control (a
+                // diferencia de Cajero, que un Administrador crea aparte solo con Caja).
+                'pos.acceder',
+                'facturacion.acceder',
+                'ventas.ver',
+                'ventas.aplicar_descuento',
+                'ventas.imprimir',
+                'gestionar_arqueo_caja',
+                // "Maestros" del Vendedor se limita a consultar lo que necesita para vender
+                // (precios de productos, datos de clientes); crear/editar/desactivar maestros
+                // queda fuera de su pantalla de trabajo.
+                'productos.ver',
+                'promociones.ver',
+                'clientes.ver',
+                // Exportar va junto con ver: un vendedor que puede consultar un reporte también
+                // necesita poder sacarlo en PDF/Excel para el día a día (cierre de caja, etc.).
+                'reportes.ver',
+                'reportes.exportar',
+                // Cobrar facturas a crédito es parte del día a día de quien vende; corregir un
+                // pago mal registrado (cxc.anular) queda para Administrador, igual que anular
+                // ventas/compras.
+                'cxc.ver',
+                'cxc.cobrar',
+                'cotizaciones.ver',
+                'cotizaciones.crear',
+                'cotizaciones.editar',
+                'cotizaciones.exportar',
+            ]);
+
+            $almacenista = $this->rolSeguro([
+                'empresa_id' => $empresa->id,
+                'name' => 'Almacenista',
+                'guard_name' => 'web',
+            ]);
+            $almacenista->syncPermissions([
+                'inventario.ajustar',
+                // Registra lo que se pierde (dañado, vencido...); anular una merma devuelve stock
+                // y queda para Administrador, igual que anular compras.
+                'inventario.mermas',
+                'kardex.ver',
+                'compras.ver',
+                'compras.crear',
+                // compras.anular queda fuera a propósito: anular una compra tiene impacto contable/
+                // de inventario que se reserva al Administrador (regla ya existente y probada).
+                'devoluciones.ver',
+                'devoluciones.crear',
+                'ordenes_compra.ver',
+                'ordenes_compra.crear',
+                'ordenes_compra.recibir',
+                'productos.ver',
+                'productos.crear',
+                'productos.editar',
+                'productos.desactivar',
+                // Solo lectura: necesita ver el proveedor al registrar una compra, pero darlo de
+                // alta/editarlo es tarea de quien mantiene los maestros, no del almacén.
+                'proveedores.ver',
+                // Solo consulta: saber cuánto se le debe a un proveedor ayuda a decidir si
+                // comprarle de nuevo, pero pagarle es una decisión financiera de Administrador.
+                'cxp.ver',
+                // Es quien repone: la única alerta que le toca. Vendedor no recibe ninguna
+                // (las de NCF, e-CF y cuentas son del Administrador).
+                'notificaciones.stock_bajo',
+            ]);
+
+        });
+
+        app(PermissionRegistrar::class)->forgetCachedPermissions();
+    }
+
+    /** Asigna el rol Administrador de $empresa a $usuario, dentro del contexto de esa empresa. */
+    public function asignarAdministrador(User $usuario, Empresa $empresa): void
+    {
+        $this->dentroDelContextoDe($empresa, function () use ($usuario) {
+            $usuario->unsetRelation('roles')->unsetRelation('permissions');
+            $usuario->assignRole('Administrador');
+        });
+    }
+
+    /**
+     * firstOrCreate seguro: si el INSERT viola la unique constraint (race condition, doble
+     * request, o desajuste entre el scope de Spatie y la constraint de BD), recupera el
+     * registro existente en vez de lanzar.
+     */
+    private function rolSeguro(array $atributos): Role
+    {
+        try {
+            return Role::firstOrCreate($atributos);
+        } catch (UniqueConstraintViolationException) {
+            // El registro existe pero el SELECT de firstOrCreate no lo encontró (scope de
+            // Spatie vs constraint de BD). Lo buscamos sin scope global.
+            return Role::withoutGlobalScopes()->where($atributos)->firstOrFail();
+        }
+    }
+
+    /**
+     * Ejecuta $callback con el contexto de permisos fijado en $empresa, y restaura el contexto
+     * anterior al salir (incluso si $callback lanza).
+     */
+    private function dentroDelContextoDe(Empresa $empresa, callable $callback): void
+    {
+        $anterior = getPermissionsTeamId();
+        setPermissionsTeamId($empresa->id);
+
+        try {
+            $callback();
+        } finally {
+            setPermissionsTeamId($anterior);
+        }
+    }
+}

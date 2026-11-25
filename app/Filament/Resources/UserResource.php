@@ -1,0 +1,156 @@
+<?php
+
+namespace App\Filament\Resources;
+
+use App\Enums\ModuloImpresion;
+use App\Filament\Resources\UserResource\Pages;
+use App\Models\User;
+use Filament\Facades\Filament;
+use Filament\Forms\Components\Select;
+use Filament\Forms\Components\TextInput;
+use Filament\Forms\Components\Toggle;
+use Filament\Resources\Resource;
+use Filament\Schemas\Schema;
+use Filament\Tables\Columns\TextColumn;
+use Filament\Tables\Columns\ToggleColumn;
+use Filament\Tables\Filters\TernaryFilter;
+use Filament\Tables\Table;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Support\Facades\Hash;
+
+class UserResource extends Resource
+{
+    protected static ?string $model = User::class;
+
+    protected static string|\BackedEnum|null $navigationIcon = 'heroicon-o-users';
+
+    protected static ?string $navigationLabel = 'Usuarios';
+
+    protected static ?string $modelLabel = 'Usuario';
+
+    protected static ?string $pluralModelLabel = 'Usuarios';
+
+    protected static ?string $slug = 'usuarios';
+
+    protected static string|\UnitEnum|null $navigationGroup = 'Configuración';
+
+    protected static ?int $navigationSort = 1;
+
+    public static function form(Schema $schema): Schema
+    {
+        return $schema->components([
+            TextInput::make('name')
+                ->label('Nombre')
+                ->required()
+                ->maxLength(255),
+
+            TextInput::make('email')
+                ->label('Correo electrónico')
+                ->email()
+                ->required()
+                ->unique(ignoreRecord: true)
+                ->maxLength(255),
+
+            TextInput::make('password')
+                ->label('Contraseña')
+                ->password()
+                ->revealable()
+                ->dehydrated(fn ($state) => filled($state))
+                ->dehydrateStateUsing(fn ($state) => Hash::make($state))
+                ->required(fn (string $operation): bool => $operation === 'create'),
+
+            Select::make('roles')
+                ->label('Roles')
+                // El Select no se scopea solo: relationship() arma sus opciones consultando
+                // Role directamente, sin el team_id de spatie (eso solo lo aplica la relación
+                // roles() del propio modelo, en la dirección usuario -> roles, no aquí).
+                ->relationship(
+                    'roles',
+                    'name',
+                    // Sin calificar la tabla: model_has_roles TAMBIÉN tiene empresa_id (columna
+                    // del team de spatie) y esta consulta hace join con esa tabla, así que
+                    // "empresa_id" a secas es ambiguo para Postgres.
+                    modifyQueryUsing: fn (Builder $query) => $query->where('roles.empresa_id', Filament::getTenant()?->id),
+                )
+                // Necesario: el sync que hace este Select al guardar es un
+                // BelongsToMany::sync() plano, que no rellena solo la columna extra del pivot
+                // (empresa_id, NOT NULL en model_has_roles) — sin esto, asignar un rol revienta
+                // el guardado con una violación de NOT NULL.
+                ->pivotData(fn (): array => ['empresa_id' => Filament::getTenant()?->id])
+                ->multiple()
+                ->preload()
+                ->searchable()
+                // Un usuario sin rol no puede acceder al panel (canAccessPanel() devuelve false
+                // si getAllPermissions() está vacío): obligar a seleccionar al menos uno evita
+                // crear usuarios "fantasma" que no pueden entrar.
+                ->required()
+                ->visible(fn (): bool => auth()->user()?->can('usuarios.gestionar') ?? false),
+
+            Select::make('impresora_facturacion_id')
+                ->label('Impresora de facturación')
+                ->helperText('Si el usuario tiene una asignada, se usa en vez de la predeterminada del módulo al imprimir tickets de venta.')
+                // Scope manual obligatorio — Filament NO aplica tenant scope dentro de
+                // ->relationship(), ni siquiera dentro de su propio Resource.
+                ->relationship('impresoraFacturacion', 'nombre', fn (Builder $query) => $query
+                    ->where('empresa_id', Filament::getTenant()?->id)
+                    ->activas()
+                    ->porModulo(ModuloImpresion::FACTURACION))
+                ->preload()
+                ->searchable()
+                ->native(false)
+                ->visible(fn (): bool => auth()->user()?->can('usuarios.gestionar') ?? false),
+
+            Toggle::make('activo')
+                ->label('Activo')
+                ->default(true)
+                ->visible(fn (): bool => auth()->user()?->can('usuarios.gestionar') ?? false),
+        ]);
+    }
+
+    public static function table(Table $table): Table
+    {
+        return $table->columns([
+            TextColumn::make('name')
+                ->label('Nombre')
+                ->searchable()
+                ->sortable(),
+
+            TextColumn::make('email')
+                ->label('Correo electrónico')
+                ->searchable()
+                ->sortable(),
+
+            TextColumn::make('roles.name')
+                ->label('Roles')
+                ->badge()
+                ->placeholder('—'),
+
+            ToggleColumn::make('activo')
+                ->label('Activo'),
+
+            TextColumn::make('created_at')
+                ->label('Creado')
+                ->dateTime('d/m/Y H:i')
+                ->sortable()
+                ->toggleable(isToggledHiddenByDefault: true),
+        ])
+            ->filters([
+                TernaryFilter::make('activo')->label('Activo')->default(true),
+            ]);
+    }
+
+
+    public static function getEloquentQuery(): \Illuminate\Database\Eloquent\Builder
+    {
+        return parent::getEloquentQuery()->with(['roles']);
+    }
+
+    public static function getPages(): array
+    {
+        return [
+            'index' => Pages\ListUsers::route('/'),
+            'create' => Pages\CreateUser::route('/create'),
+            'edit' => Pages\EditUser::route('/{record}/edit'),
+        ];
+    }
+}

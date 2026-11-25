@@ -1,0 +1,352 @@
+<?php
+
+namespace App\Services;
+
+use App\Enums\EstadoCompra;
+use App\Enums\OrigenMovimiento;
+use App\Enums\TasaItbis;
+use App\Enums\TipoComprobante;
+use App\Enums\TipoMovimiento;
+use App\Enums\TipoPago;
+use App\Exceptions\CuentaConPagosRegistradosException;
+use App\Models\Compra;
+use App\Models\DetalleCompra;
+use App\Models\Empresa;
+use App\Models\Producto;
+use App\Models\ProductoProveedor;
+use App\Models\Proveedor;
+use Carbon\Carbon;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
+
+class CompraService
+{
+    public function __construct(
+        private readonly InventarioService $inventarioService,
+        private readonly SecuenciaNcfService $ncfService,
+        private readonly CuentaPorPagarService $cuentaPorPagarService,
+        private readonly CostoPrecioService $costoPrecioService,
+        private readonly OrdenCompraService $ordenCompraService,
+    ) {}
+
+    /**
+     * Crea una compra completa: detalles, totales e inventario.
+     *
+     * @param  array{
+     *   proveedor_id:      int,
+     *   tipo_comprobante:  TipoComprobante|null,
+     *   ncf:               string|null,
+     *   fecha:             Carbon,
+     *   itbis_incluido:    bool,
+     *   lineas: array<int, array{
+     *     producto_id:    int,
+     *     cantidad:       float,
+     *     costo_unitario: float,
+     *     total?:         float|null,
+     *   }>
+     * } $datos  tipo_comprobante/ncf se ignoran y se autogeneran si el proveedor es informal.
+     *            orden_compra_id (opcional): la orden de compra cuya mercancía recibe esta compra.
+     */
+    public function crear(array $datos, int $userId, Empresa $empresa): Compra
+    {
+        // Descarta líneas incompletas (p. ej. una fila del repeater sin producto seleccionado)
+        // en vez de dejar que revienten más abajo con un ModelNotFoundException.
+        $datos['lineas'] = array_values(array_filter(
+            $datos['lineas'] ?? [],
+            fn (array $l) => filled($l['producto_id'] ?? null) && filled($l['cantidad'] ?? null) && filled($l['costo_unitario'] ?? null),
+        ));
+
+        if (empty($datos['lineas'])) {
+            throw new RuntimeException('La compra debe tener al menos una línea.');
+        }
+
+        return DB::transaction(function () use ($datos, $userId, $empresa) {
+            $proveedor = Proveedor::where('empresa_id', $empresa->id)->findOrFail($datos['proveedor_id']);
+            $orden = filled($datos['orden_compra_id'] ?? null)
+                ? $this->ordenCompraService->ordenParaRecibir($datos['orden_compra_id'], $proveedor, $empresa)
+                : null;
+            $itbisIncluido = (bool) ($datos['itbis_incluido'] ?? false);
+
+            $detallesCalc = $this->calcularLineas($datos['lineas'], $itbisIncluido, $empresa);
+            $totales = $this->calcularTotales($detallesCalc);
+
+            // Proveedor informal: no emite comprobante fiscal propio, el sistema le genera
+            // uno con la secuencia de "Comprobantes de Compras" (tipo 41). Proveedor formal:
+            // se registra el comprobante que el proveedor entregó, tal cual lo digitó el usuario.
+            if ($proveedor->esInformal()) {
+                $tipoComprobante = TipoComprobante::COMPRAS;
+                $ncf = $this->ncfService->siguiente(TipoComprobante::COMPRAS, $empresa);
+            } else {
+                $tipoComprobante = $datos['tipo_comprobante'] ?? TipoComprobante::COMPRAS;
+                $ncf = $datos['ncf'] ?? null;
+            }
+
+            // NCF del proveedor no puede estar duplicado para la misma empresa+proveedor
+            // (evita registrar la misma factura dos veces).
+            if (! $proveedor->esInformal() && filled($ncf)) {
+                $duplicado = Compra::where('empresa_id', $empresa->id)
+                    ->where('proveedor_id', $proveedor->id)
+                    ->where('ncf', $ncf)
+                    ->where('estado', '!=', EstadoCompra::ANULADA)
+                    ->exists();
+
+                if ($duplicado) {
+                    throw new RuntimeException(
+                        "Ya existe una compra activa con el NCF «{$ncf}» para este proveedor."
+                    );
+                }
+            }
+
+            $tipoPago = $datos['tipo_pago'] ?? TipoPago::CONTADO;
+            $tipoPago = $tipoPago instanceof TipoPago ? $tipoPago : TipoPago::from((int) $tipoPago);
+
+            $fechaVencimiento = $tipoPago === TipoPago::CREDITO
+                ? ($datos['fecha_vencimiento'] ?? now()->addDays(30)->toDateString())
+                : null;
+
+            $compra = Compra::create([
+                // Se deriva del proveedor (ya cargado arriba) en vez de depender de que
+                // Filament haya asociado el tenant automáticamente: este service puede
+                // invocarse fuera del ciclo de vida de una request de panel (colas, comandos,
+                // tests).
+                'empresa_id' => $proveedor->empresa_id,
+                'proveedor_id' => $proveedor->id,
+                'orden_compra_id' => $orden?->id,
+                'user_id' => $userId,
+                'tipo_comprobante' => $tipoComprobante,
+                'ncf' => $ncf,
+                'fecha' => $datos['fecha'],
+                'itbis_incluido' => $itbisIncluido,
+                'monto_total_factura' => $datos['monto_total_factura'] ?? null,
+                'tipo_pago' => $tipoPago,
+                'fecha_vencimiento' => $fechaVencimiento,
+                'estado' => EstadoCompra::REGISTRADA,
+                ...$totales,
+            ]);
+
+            foreach ($detallesCalc as $linea) {
+                DetalleCompra::create([
+                    'compra_id' => $compra->id,
+                    'producto_id' => $linea['producto_id'],
+                    'cantidad' => $linea['cantidad'],
+                    'costo_unitario' => $linea['costo_unitario'],
+                    'tasa_itbis' => $linea['tasa_itbis'],
+                    'itbis_monto' => $linea['itbis_monto'],
+                    'subtotal' => $linea['subtotal'],
+                ]);
+
+                $producto = Producto::where('empresa_id', $empresa->id)->find($linea['producto_id']);
+                if ($producto) {
+                    $movimiento = $this->inventarioService->registrarMovimiento(
+                        $producto,
+                        TipoMovimiento::ENTRADA,
+                        OrigenMovimiento::COMPRA,
+                        (string) $linea['cantidad'],
+                        $compra->id,
+                        $userId,
+                    );
+
+                    // El costo (sin ITBIS) se actualiza según el método de costo de la empresa:
+                    // manual, última compra o promedio ponderado.
+                    $this->costoPrecioService->aplicarEntrada($producto, $movimiento, $linea['cantidad'], $linea['costo_unitario'], $empresa);
+
+                    // Vincula producto-proveedor en el catálogo automáticamente al comprarle:
+                    // si es el primer proveedor del producto, queda como principal. En compras
+                    // posteriores al mismo proveedor solo se refresca el costo de referencia,
+                    // sin tocar "es_principal" (respeta lo que haya curado el usuario a mano).
+                    $vinculo = ProductoProveedor::firstOrCreate(
+                        ['producto_id' => $producto->id, 'proveedor_id' => $proveedor->id],
+                        ['costo_referencia' => $linea['costo_unitario'], 'es_principal' => ! $producto->proveedores()->exists()],
+                    );
+
+                    if (! $vinculo->wasRecentlyCreated) {
+                        $vinculo->update(['costo_referencia' => $linea['costo_unitario']]);
+                    }
+                }
+            }
+
+            if ($tipoPago === TipoPago::CREDITO) {
+                $this->cuentaPorPagarService->crearDesdeCompra($compra);
+            }
+
+            // La mercancía de la orden entró con esta compra (stock, costo, CxP, 606): la orden
+            // solo anota cuánto se recibió. Si se pasa de lo pendiente, se revierte todo.
+            if ($orden !== null) {
+                $this->ordenCompraService->registrarRecepcionDeCompra($orden, $compra, $detallesCalc, $userId);
+            }
+
+            return $compra->load('detalles.producto', 'proveedor');
+        });
+    }
+
+    /**
+     * Anula una compra: revierte inventario y marca como ANULADA.
+     */
+    public function anular(Compra $compra, string $motivo, int $userId): Compra
+    {
+        if ($compra->estaAnulada()) {
+            throw new RuntimeException('La compra ya está anulada.');
+        }
+
+        return DB::transaction(function () use ($compra, $motivo, $userId) {
+            // Re-leer con lock para evitar anulación concurrente
+            $compra = Compra::lockForUpdate()->findOrFail($compra->id);
+
+            if ($compra->estaAnulada()) {
+                throw new RuntimeException('La compra ya está anulada.');
+            }
+
+            $cuentaPorPagar = $compra->cuentaPorPagar;
+
+            if ($cuentaPorPagar !== null && bccomp((string) $cuentaPorPagar->monto_pagado, '0', 2) > 0) {
+                throw new CuentaConPagosRegistradosException(
+                    "No se puede anular la compra #{$compra->id}: su cuenta por pagar ya tiene pagos registrados."
+                );
+            }
+
+            $cuentaPorPagar?->delete();
+
+            foreach ($compra->detalles as $detalle) {
+                $producto = $detalle->producto;
+                if ($producto) {
+                    $movimiento = $this->inventarioService->registrarMovimiento(
+                        $producto,
+                        TipoMovimiento::SALIDA,
+                        OrigenMovimiento::ANULACION,
+                        (string) $detalle->cantidad,
+                        $compra->id,
+                        $userId,
+                        "Anulación compra #{$compra->id}",
+                    );
+
+                    // Con promedio ponderado, saca del promedio lo que esta compra había metido.
+                    $this->costoPrecioService->revertirEntrada($producto, $movimiento, $detalle->cantidad, $detalle->costo_unitario, $compra->empresa);
+                }
+            }
+
+            $compra->update([
+                'estado' => EstadoCompra::ANULADA,
+                'motivo_anulacion' => $motivo,
+                'anulada_en' => now(),
+            ]);
+
+            // Si recibió una orden de compra, lo recibido con esta compra vuelve a quedar pendiente.
+            if ($compra->orden_compra_id !== null) {
+                $this->ordenCompraService->revertirRecepcionDeCompra($compra);
+            }
+
+            return $compra->refresh();
+        });
+    }
+
+    // -------------------------------------------------------------------------
+
+    /**
+     * Calcula costo base, ITBIS y subtotal de cada línea. La tasa de ITBIS la determina
+     * el producto (no se digita en la compra). Si $itbisIncluido es true, el costo digitado
+     * ya trae el impuesto adentro y se extrae la base; el costo_unitario resultante siempre
+     * queda sin ITBIS (igual que DetalleVenta::precio_unitario), tanto en el detalle como en
+     * el Producto.costo que se sincroniza con él.
+     *
+     * Público porque CompraResource lo reutiliza para previsualizar totales en vivo.
+     */
+    public function calcularLineas(array $lineas, bool $itbisIncluido, Empresa $empresa): array
+    {
+        return array_map(function (array $l) use ($itbisIncluido, $empresa) {
+            $producto = Producto::where('empresa_id', $empresa->id)->findOrFail($l['producto_id']);
+            $tasa = $producto->tasa_itbis;
+            $porcentaje = $tasa->porcentaje();
+            $cantidadStr = (string) ($l['cantidad'] ?? '0');
+            $digitadoStr = (string) ($l['costo_unitario'] ?? '0');
+            $porcentajeStr = (string) $porcentaje;
+
+            // El formulario ya lo impide, pero el service es el que mueve stock y registra la CxP:
+            // una cantidad negativa sacaría inventario como si fuera una "entrada".
+            if (bccomp($cantidadStr, '0', 3) <= 0) {
+                throw new RuntimeException("La cantidad de «{$producto->nombre}» debe ser mayor que cero.");
+            }
+
+            if (bccomp($digitadoStr, '0', 2) < 0) {
+                throw new RuntimeException("El costo de «{$producto->nombre}» no puede ser negativo.");
+            }
+
+            $divisorItbis = bcadd('1', bcdiv($porcentajeStr, '100', 6), 6);
+            $quitarItbis = $itbisIncluido && bccomp($porcentajeStr, '0', 2) > 0;
+
+            // Compra por peso: llega el importe pagado por la línea y la cantidad es el peso real. El subtotal sale de ese importe, no de costo × cantidad,
+            // porque el costo por libra redondeado a centavos (2,400 ÷ 196 = 12.2449 → 12.24) no
+            // devuelve el total pagado y la compra no cuadraría con la factura ni con la CxP.
+            if (filled($l['total'] ?? null)) {
+                $totalStr = bcadd((string) $l['total'], '0', 2);
+
+                if (bccomp($totalStr, '0', 2) < 0) {
+                    throw new RuntimeException("El importe de «{$producto->nombre}» no puede ser negativo.");
+                }
+
+                $subtotal = $quitarItbis ? $this->bcround2(bcdiv($totalStr, $divisorItbis, 6)) : $totalStr;
+                $costoBase = bcdiv($subtotal, $cantidadStr, 4);
+            } else {
+                $costoBase = $quitarItbis ? bcdiv($digitadoStr, $divisorItbis, 4) : $digitadoStr;
+                $subtotal = bcmul($costoBase, $cantidadStr, 2);
+            }
+
+            $itbisMonto = bcdiv(bcmul($subtotal, $porcentajeStr, 4), '100', 2);
+
+            return [
+                'producto_id' => $l['producto_id'],
+                'cantidad' => $cantidadStr,
+                // Con importe: costo por libra redondeado; sin él, se conserva el truncado de siempre.
+                'costo_unitario' => filled($l['total'] ?? null) ? $this->bcround2($costoBase) : bcmul($costoBase, '1', 2),
+                'tasa_itbis' => $tasa,
+                'subtotal' => $subtotal,
+                'itbis_monto' => $itbisMonto,
+            ];
+        }, $lineas);
+    }
+
+    /** Agrupa totales de la cabecera de compra. Público: reutilizado por CompraResource. */
+    public function calcularTotales(array $lineas): array
+    {
+        $montoGravado18 = '0';
+        $montoGravado16 = '0';
+        $montoGravado0 = '0';
+        $montoExento = '0';
+        $subtotal = '0';
+
+        foreach ($lineas as $l) {
+            $sub = (string) $l['subtotal'];
+            $subtotal = bcadd($subtotal, $sub, 2);
+
+            match ($l['tasa_itbis']) {
+                TasaItbis::DIECIOCHO => $montoGravado18 = bcadd($montoGravado18, $sub, 2),
+                TasaItbis::DIECISEIS => $montoGravado16 = bcadd($montoGravado16, $sub, 2),
+                TasaItbis::CERO => $montoGravado0 = bcadd($montoGravado0, $sub, 2),
+                // Víveres, frutas y vegetales frescos: sin este caso, comprar un exento
+                // reventaba con UnhandledMatchError.
+                TasaItbis::EXENTO => $montoExento = bcadd($montoExento, $sub, 2),
+            };
+        }
+
+        $itbis18 = bcmul($montoGravado18, '0.18', 2);
+        $itbis16 = bcmul($montoGravado16, '0.16', 2);
+        $totalItbis = bcadd($itbis18, $itbis16, 2);
+
+        return [
+            'subtotal' => $subtotal,
+            'monto_gravado_18' => $montoGravado18,
+            'monto_gravado_16' => $montoGravado16,
+            'monto_gravado_0' => $montoGravado0,
+            'monto_exento' => bcadd($montoExento, '0', 2),
+            'itbis_18' => $itbis18,
+            'itbis_16' => $itbis16,
+            'itbis' => $totalItbis,
+            'total' => bcadd($subtotal, $totalItbis, 2),
+        ];
+    }
+
+    /** Redondeo HALF_UP a 2 decimales con bcmath (valores no negativos). */
+    private function bcround2(string $valor): string
+    {
+        return bcadd($valor, '0.005', 2);
+    }
+}

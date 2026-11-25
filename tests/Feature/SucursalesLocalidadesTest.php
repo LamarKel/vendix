@@ -264,6 +264,45 @@ class SucursalesLocalidadesTest extends TestCase
             ->assertCanNotSeeTableRecords(Sucursal::where('empresa_id', $otra->id)->get());
     }
 
+    public function test_existencias_por_localidad_en_su_sucursal_y_total_en_las_otras(): void
+    {
+        $this->seed(\Database\Seeders\RolePermissionSeeder::class);
+        $norte = $this->segundaSucursal();
+        $this->entrada($this->localidad($norte, TipoLocalidad::ALMACENAJE), 7);
+        $this->entrada($this->localidad($norte, TipoLocalidad::VENTA), 3);
+        $this->entrada($this->localidad($this->principal(), TipoLocalidad::ALMACENAJE), 50);
+
+        $vendedor = User::factory()->create(['empresa_id' => $this->empresaDefault->id, 'sucursal_id' => $this->principal()->id]);
+        setPermissionsTeamId($this->empresaDefault->id);
+        $vendedor->assignRole(\Spatie\Permission\Models\Role::where('empresa_id', $this->empresaDefault->id)->where('name', 'Vendedor')->first());
+
+        $datos = \App\Support\ExistenciaVisible::paraProducto($this->producto, $vendedor->fresh(), $this->empresaDefault);
+
+        $this->assertSame('Principal', $datos['sucursal']);
+        $this->assertEquals(['Almacén' => 50, 'Recibo' => 0, 'Tienda' => 10], collect($datos['propia'])->pluck('cantidad', 'localidad')->sortKeys()->all());
+        $this->assertSame([['sucursal' => 'Norte', 'total' => 10.0]], $datos['otras']);
+    }
+
+    public function test_no_se_ajusta_una_localidad_de_otra_sucursal(): void
+    {
+        $this->seed(\Database\Seeders\RolePermissionSeeder::class);
+        $norte = $this->segundaSucursal();
+        $almacenista = User::factory()->create(['empresa_id' => $this->empresaDefault->id, 'sucursal_id' => $this->principal()->id]);
+        setPermissionsTeamId($this->empresaDefault->id);
+        $rol = \Spatie\Permission\Models\Role::where('empresa_id', $this->empresaDefault->id)->where('name', 'Almacenista')->first();
+        $rol->givePermissionTo('inventario.ajustar');
+        $almacenista->assignRole($rol);
+
+        \Livewire\Livewire::actingAs($almacenista->fresh())
+            ->test(\App\Filament\Resources\ProductoResource\Pages\ListProductos::class)
+            ->callTableAction('ajustarStock', $this->producto, data: [
+                'tipo' => 'entrada', 'cantidad' => 5, 'localidad_id' => $this->localidad($norte, TipoLocalidad::VENTA)->id,
+            ]);
+
+        $this->assertEquals(0, $this->stock($this->localidad($norte, TipoLocalidad::VENTA)));
+        $this->assertEquals(10, (float) $this->producto->fresh()->stock);
+    }
+
     private function usuario(): User
     {
         return User::factory()->create(['empresa_id' => $this->empresaDefault->id]);

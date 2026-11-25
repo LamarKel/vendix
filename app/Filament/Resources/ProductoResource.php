@@ -466,6 +466,17 @@ class ProductoResource extends Resource
                 TernaryFilter::make('activo')->label('Activo')->default(true),
             ])
             ->recordActions([
+                Action::make('existencias')
+                    ->label('Existencias')
+                    ->icon('heroicon-o-map-pin')
+                    ->color('gray')
+                    ->visible(fn (Producto $record): bool => $record->controla_stock && (auth()->user()?->can('inventario.ver_localidades') || auth()->user()?->can('productos.ver')))
+                    ->modalHeading(fn (Producto $record) => "Existencias — {$record->nombre}")
+                    ->modalContent(fn (Producto $record) => view('filament.modales.existencias-producto', [
+                        'datos' => \App\Support\ExistenciaVisible::paraProducto($record, auth()->user(), Filament::getTenant()),
+                    ]))
+                    ->modalSubmitAction(false)
+                    ->modalCancelActionLabel('Cerrar'),
                 Action::make('ajustarStock')
                     ->label('Ajustar stock')
                     ->icon('heroicon-o-adjustments-horizontal')
@@ -480,6 +491,15 @@ class ProductoResource extends Resource
                             ])
                             ->required(),
 
+                        Select::make('localidad_id')
+                            ->label('Localidad')
+                            ->helperText('Solo las localidades de tu sucursal.')
+                            ->options(fn () => array_replace([], ...array_values(\App\Filament\Resources\RequisicionResource::opcionesLocalidades(soloMiSucursal: true))))
+                            ->default(fn () => app(\App\Services\LocalidadService::class)->localidadDeVenta(
+                                app(\App\Services\LocalidadService::class)->sucursalDe(Filament::getTenant(), auth()->user())
+                            )->id)
+                            ->required(),
+
                         TextInput::make('cantidad')
                             ->label('Cantidad')
                             ->numeric()
@@ -492,6 +512,15 @@ class ProductoResource extends Resource
                     ])
                     ->action(function (Producto $record, array $data): void {
                         try {
+                            // La localidad viene del formulario: se revalida empresa y sucursal.
+                            $localidad = filled($data['localidad_id'] ?? null)
+                                ? app(\App\Services\LocalidadService::class)->localidadDeEmpresa(Filament::getTenant(), (int) $data['localidad_id'])
+                                : null;
+
+                            if ($localidad !== null && ! app(\App\Services\RequisicionService::class)->esDeSuSucursal(auth()->user(), $localidad)) {
+                                throw new \RuntimeException('No puedes ajustar una localidad de otra sucursal.');
+                            }
+
                             DB::transaction(fn () => app(InventarioService::class)->registrarMovimiento(
                                 $record,
                                 TipoMovimiento::from($data['tipo']),
@@ -500,8 +529,9 @@ class ProductoResource extends Resource
                                 null,
                                 auth()->id(),
                                 $data['observacion'] ?? null,
+                                localidad: $localidad,
                             ));
-                        } catch (StockInsuficienteException $e) {
+                        } catch (StockInsuficienteException|\RuntimeException $e) {
                             Notification::make()->title(MensajeError::para($e))->danger()->send();
 
                             return;

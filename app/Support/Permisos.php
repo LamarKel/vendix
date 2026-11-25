@@ -86,6 +86,12 @@ class Permisos
                 'inventario.mermas' => 'Registrar y ver mermas',
                 'inventario.mermas_anular' => 'Anular mermas',
                 'inventario.ver_localidades' => 'Ver existencia por localidad de su sucursal',
+                'inventario.mover' => 'Mover mercancía entre localidades de su sucursal (movimiento interno)',
+                'requisiciones.ver' => 'Ver requisiciones',
+                'requisiciones.crear' => 'Crear requisiciones (pedir mercancía)',
+                'requisiciones.despachar' => 'Despachar requisiciones desde su localidad',
+                'requisiciones.recibir' => 'Recibir requisiciones en su localidad',
+                'requisiciones.aprobar' => 'Aprobar o rechazar requisiciones entre sucursales',
             ],
             'Compras' => [
                 'compras.ver' => 'Ver compras',

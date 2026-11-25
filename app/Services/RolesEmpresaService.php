@@ -65,6 +65,9 @@ class RolesEmpresaService
                 'pedidos.crear',
                 'pedidos.ver',
                 'pedidos.cobrar',
+                'requisiciones.ver',
+                'requisiciones.crear',
+                'requisiciones.recibir',
                 'cotizaciones.ver',
                 'cotizaciones.crear',
                 'cotizaciones.editar',
@@ -105,6 +108,11 @@ class RolesEmpresaService
                 // (las de NCF, e-CF y cuentas son del Administrador).
                 'notificaciones.stock_bajo',
                 'inventario.ver_localidades',
+                'inventario.mover',
+                'requisiciones.ver',
+                'requisiciones.crear',
+                'requisiciones.despachar',
+                'requisiciones.recibir',
             ]);
 
         });

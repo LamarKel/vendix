@@ -213,9 +213,29 @@ de secuencia = serie + tipo (`E31`, `B02`): el servicio agrega el secuencial.
 ## Inventario (Kardex)
 
 `App\Services\InventarioService::registrarMovimiento()` es el único punto que mueve stock. Bloquea
-la fila del producto con `lockForUpdate`, y lanza `App\Exceptions\StockInsuficienteException` si el
-resultado quedaría negativo. Debe invocarse dentro de una transacción abierta por el llamador.
-Cada movimiento guarda `costo_unitario` (costo del producto antes de moverlo).
+la fila del producto y la de su localidad con `lockForUpdate`, y lanza
+`App\Exceptions\StockInsuficienteException` si la LOCALIDAD quedaría negativa. Debe invocarse
+dentro de una transacción abierta por el llamador. Cada movimiento guarda `costo_unitario` y la
+localidad con su existencia antes/después.
+
+### Sucursales y localidades
+
+- `sucursales` → `localidades` (tipo `venta`, `recepcion` o `almacenaje`) → `stock_localidades`.
+  Una localidad de venta y una de recepción activas por sucursal (índice parcial). Toda empresa
+  nace con la sucursal Principal y Tienda/Recibo/Almacén (`LocalidadService::asegurarEstructura`).
+- `stock_localidades` es el número real; `productos.stock` es el total de la empresa y lo mantiene
+  InventarioService. Un cambio directo de `productos.stock` (alta con stock inicial, importación)
+  se refleja en la Tienda de la principal vía `ProductoObserver` → `sincronizarDiferencia()`.
+- Venta: descuenta de la localidad de venta de la sucursal de la caja, si no del usuario, si no
+  la principal. Solo esa localidad puede quedar en negativo (y solo con `permite_stock_negativo`).
+- Compra: entra a la localidad elegida o, por defecto, a Recepción si `compras_a_recepcion`
+  (empresas nuevas) o a Venta si no. Anular/devolver saca de donde entró.
+- Requisiciones (`RequisicionService`): crear (destino de mi sucursal) → [aprobar, si es entre
+  sucursales y la config lo pide] → despachar (sale del origen; solo la sucursal origen) →
+  recibir (entra al destino; solo la sucursal destino; lo no recibido queda como faltante).
+  Movimiento interno = mismo documento en un paso, dentro de una sucursal (`MI-`).
+- Visibilidad (`App\Support\ExistenciaVisible`): de su sucursal, por localidad; de otras, solo
+  el total. `sucursales.administrar` ve y opera todo.
 
 Mermas (`App\Services\MermaService`, Inventario → Mermas): no tienen tablas propias. Cada merma es
 un movimiento SALIDA con origen `merma`, su `motivo` (`App\Enums\MotivoMerma`) y su costo. Anular

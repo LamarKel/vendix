@@ -16,6 +16,8 @@ enum TipoNotificacion: string
     case ECF_RECHAZADO = 'ecf_rechazado';
     case CXC_VENCIDAS = 'cxc_vencidas';
     case CXP_VENCIDAS = 'cxp_vencidas';
+    case RECEPCION_PENDIENTE = 'recepcion_pendiente';
+    case ANTIRROBO = 'antirrobo';
 
     public function permiso(): string
     {
@@ -30,6 +32,8 @@ enum TipoNotificacion: string
             self::ECF_RECHAZADO => 'e-CF rechazado o sin respuesta de la DGII',
             self::CXC_VENCIDAS => 'Cuentas por cobrar vencidas',
             self::CXP_VENCIDAS => 'Cuentas por pagar vencidas',
+            self::RECEPCION_PENDIENTE => 'Mercancía en recepción sin ubicar',
+            self::ANTIRROBO => 'Alertas de control (anulaciones, descuentos, faltantes)',
         };
     }
 
@@ -41,7 +45,7 @@ enum TipoNotificacion: string
     public function seEnviaEnApp(): bool
     {
         return match ($this) {
-            self::STOCK_BAJO, self::NCF_AGOTANDOSE, self::ECF_RECHAZADO => true,
+            self::STOCK_BAJO, self::NCF_AGOTANDOSE, self::ECF_RECHAZADO, self::RECEPCION_PENDIENTE, self::ANTIRROBO => true,
             self::CXC_VENCIDAS, self::CXP_VENCIDAS => false,
         };
     }

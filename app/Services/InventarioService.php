@@ -24,6 +24,13 @@ class InventarioService
      */
     public static bool $moviendo = false;
 
+    /** Únicos orígenes que pueden SUMAR existencia en una localidad de recepción. */
+    private const ENTRAN_A_RECEPCION = [
+        OrigenMovimiento::COMPRA,
+        OrigenMovimiento::RECEPCION_ORDEN_COMPRA,
+        OrigenMovimiento::ANULACION, // reverso de una devolución a proveedor que salió de ahí
+    ];
+
     public function __construct(private readonly LocalidadService $localidades) {}
 
     /**
@@ -79,6 +86,12 @@ class InventarioService
             TipoMovimiento::SALIDA => bcsub('0', $cantidad, 3),
             TipoMovimiento::AJUSTE => $cantidad, // ya trae el signo
         };
+
+        // A Recepción solo entra mercancía de compras (o el reverso de una devolución a proveedor).
+        // Lo que ya salió de Recepción no vuelve ahí por requisición, movimiento ni ajuste.
+        if ($localidad->tipo === TipoLocalidad::RECEPCION && bccomp($delta, '0', 3) > 0 && ! in_array($origen, self::ENTRAN_A_RECEPCION, true)) {
+            throw new RuntimeException("A {$localidad->nombre} solo entra mercancía al registrar una compra.");
+        }
 
         $fila = $this->filaBloqueada($localidad, $producto);
 

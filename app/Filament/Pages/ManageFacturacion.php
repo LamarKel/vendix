@@ -75,6 +75,10 @@ class ManageFacturacion extends Page
             'compras_a_recepcion' => $config->compras_a_recepcion,
             'requisicion_sucursal_requiere_aprobacion' => $config->requisicion_sucursal_requiere_aprobacion,
             'dias_alerta_recepcion' => $config->dias_alerta_recepcion,
+            'antirrobo_umbral_anulaciones' => $config->antirrobo_umbral_anulaciones,
+            'antirrobo_umbral_descuentos' => $config->antirrobo_umbral_descuentos,
+            'antirrobo_umbral_devoluciones' => $config->antirrobo_umbral_devoluciones,
+            'antirrobo_umbral_ajustes' => $config->antirrobo_umbral_ajustes,
             'textos_documentos' => collect(DocumentoImpreso::cases())->mapWithKeys(
                 fn (DocumentoImpreso $doc) => [$doc->value => collect($doc->campos())->mapWithKeys(
                     fn (string $campo) => [$campo => $config->textoDocumento($doc, $campo)]
@@ -227,6 +231,17 @@ class ManageFacturacion extends Page
                         TextInput::make('dias_alerta_recepcion')
                             ->label('Avisar si hay mercancía en recepción sin ubicar por más de (días)')
                             ->numeric()->integer()->minValue(1)->maxValue(60)->required(),
+                    ]),
+
+                Section::make('Control antirrobo')
+                    ->description('A partir de cuánto, por persona y por día, el sistema avisa al dueño. Los faltantes de caja y de requisiciones avisan siempre.')
+                    ->columnSpanFull()
+                    ->columns(2)
+                    ->schema([
+                        TextInput::make('antirrobo_umbral_anulaciones')->label('Anulaciones de ventas por día')->numeric()->integer()->minValue(1)->required(),
+                        TextInput::make('antirrobo_umbral_devoluciones')->label('Devoluciones de clientes por día')->numeric()->integer()->minValue(1)->required(),
+                        TextInput::make('antirrobo_umbral_descuentos')->label('Descuentos dados por día')->numeric()->prefix('RD$')->minValue(0)->required(),
+                        TextInput::make('antirrobo_umbral_ajustes')->label('Salidas por ajuste o merma por día')->numeric()->prefix('RD$')->minValue(0)->required(),
                     ]),
 
                 Section::make('Punto de venta')

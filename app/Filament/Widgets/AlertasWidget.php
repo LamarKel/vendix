@@ -43,6 +43,8 @@ class AlertasWidget extends Widget
         'ecf_rechazado' => 'ecf.gestionar',
         'cxc_vencidas' => 'cxc.ver',
         'cxp_vencidas' => 'cxp.ver',
+        'recepcion_pendiente' => 'inventario.ver_localidades',
+        'antirrobo' => 'reportes.ver',
     ];
 
     public static function canView(): bool
@@ -77,6 +79,8 @@ class AlertasWidget extends Widget
             TipoNotificacion::ECF_RECHAZADO->value => fn () => [...$this->alertasEcfRechazado(), ...$this->alertasEcfPendiente()],
             TipoNotificacion::CXC_VENCIDAS->value => fn () => $this->alertasCxcVencidas(),
             TipoNotificacion::CXP_VENCIDAS->value => fn () => $this->alertasCxpVencidas(),
+            TipoNotificacion::RECEPCION_PENDIENTE->value => fn () => $this->alertasRecepcion(),
+            TipoNotificacion::ANTIRROBO->value => fn () => $this->alertasAntirrobo(),
         ])
             ->filter(fn ($calcular, string $tipo) => self::puedeVer(TipoNotificacion::from($tipo)))
             ->flatMap(fn ($calcular) => $calcular())
@@ -89,6 +93,27 @@ class AlertasWidget extends Widget
         return $licenciaAlertas->isNotEmpty()
             ? $licenciaAlertas->merge($alertas)
             : $alertas;
+    }
+
+    /** @return array<int, array{color: string, titulo: string, detalle: string}> */
+    private function alertasRecepcion(): array
+    {
+        $usuario = auth()->user();
+        $sucursal = $usuario?->can('sucursales.administrar') ? null : $usuario?->sucursal_id;
+        $servicio = app(\App\Services\AlertaRecepcionService::class);
+        $filas = $servicio->olvidada(Filament::getTenant(), $sucursal);
+
+        return $filas->isEmpty() ? [] : [[
+            'color' => 'amarillo',
+            'titulo' => 'Mercancía en recepción sin ubicar',
+            'detalle' => $servicio->resumen($filas),
+        ]];
+    }
+
+    /** @return array<int, array{color: string, titulo: string, detalle: string}> */
+    private function alertasAntirrobo(): array
+    {
+        return app(\App\Services\AlertaAntirroboService::class)->alertasDashboard(Filament::getTenant());
     }
 
     /** @return array<int, array{color: string, titulo: string, detalle: string}> */

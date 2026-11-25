@@ -124,6 +124,7 @@ class Permisos
                 'reportes.cxc' => 'Ver reporte de cuentas por cobrar',
                 'reportes.cxp' => 'Ver reporte de cuentas por pagar',
                 'reportes.margen' => 'Ver reporte de margen por producto',
+                'reportes.control' => 'Ver control antirrobo (anulaciones, descuentos, faltantes por persona)',
             ],
             'Configuración' => [
                 'empresa.administrar' => 'Administrar datos de la empresa',

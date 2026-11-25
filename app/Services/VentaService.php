@@ -440,6 +440,7 @@ class VentaService
                 'estado' => EstadoVenta::ANULADA,
                 'motivo_anulacion' => $motivo,
                 'anulada_en' => now(),
+                'anulada_por' => $userId,
                 'tipo_anulacion_608' => $venta->tipo_comprobante?->esFisico() ? $tipoAnulacion608 : null,
             ]);
 

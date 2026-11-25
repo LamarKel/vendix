@@ -263,7 +263,9 @@ class RequisicionTest extends TestCase
     {
         $recibo = $this->loc($this->principal, TipoLocalidad::RECEPCION);
         $almacen = $this->loc($this->principal, TipoLocalidad::ALMACENAJE);
-        $this->entrada($recibo, 30);
+        DB::transaction(fn () => app(InventarioService::class)->registrarMovimiento(
+            $this->producto, TipoMovimiento::ENTRADA, OrigenMovimiento::COMPRA, '30', localidad: $recibo,
+        ));
         $almacenista = $this->usuario('Almacenista', $this->principal);
 
         $mi = $this->svc->moverInterno($this->empresaDefault, $almacenista, $recibo->id, $almacen->id, [['producto_id' => $this->producto->id, 'cantidad' => 30]]);
@@ -361,5 +363,43 @@ class RequisicionTest extends TestCase
 
         $this->assertSame('Disponible en Almacén: 100.00', $propia);
         $this->assertSame('Total en Norte: 40.00', $ajena);
+    }
+
+    public function test_a_recibo_solo_entra_por_compra_y_lo_que_sale_no_vuelve(): void
+    {
+        $recibo = $this->loc($this->principal, TipoLocalidad::RECEPCION);
+        $almacen = $this->loc($this->principal, TipoLocalidad::ALMACENAJE);
+        $almacenista = $this->usuario('Almacenista', $this->principal);
+
+        // Un ajuste no puede sumar en Recibo.
+        try {
+            $this->entrada($recibo, 5);
+            $this->fail('Un ajuste no debe entrar a Recibo.');
+        } catch (RuntimeException $e) {
+            $this->assertStringContainsString('solo entra mercancía al registrar una compra', $e->getMessage());
+        }
+
+        // Ni un movimiento interno ni una requisición pueden tener Recibo como destino.
+        foreach ([
+            fn () => $this->svc->moverInterno($this->empresaDefault, $almacenista, $almacen->id, $recibo->id, [['producto_id' => $this->producto->id, 'cantidad' => 1]]),
+            fn () => $this->pedir($almacenista, $almacen, $recibo, 1),
+        ] as $intento) {
+            try {
+                $intento();
+                $this->fail('Recibo no puede ser destino.');
+            } catch (RuntimeException $e) {
+                $this->assertStringContainsString('recepción', $e->getMessage());
+            }
+        }
+
+        // Una compra sí entra, y de ahí se puede sacar al almacén.
+        DB::transaction(fn () => app(InventarioService::class)->registrarMovimiento(
+            $this->producto, TipoMovimiento::ENTRADA, OrigenMovimiento::COMPRA, '8', localidad: $recibo,
+        ));
+        $this->svc->moverInterno($this->empresaDefault, $almacenista, $recibo->id, $almacen->id, [['producto_id' => $this->producto->id, 'cantidad' => 8]]);
+
+        $this->assertEquals(0, $this->stock($recibo));
+        $this->assertEquals(108, $this->stock($almacen));
+        $this->assertEquals(0, MovimientoInventario::where('localidad_id', $recibo->id)->where('tipo', 'entrada')->where('origen', '!=', 'compra')->count());
     }
 }

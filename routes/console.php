@@ -13,6 +13,12 @@ Schedule::call(fn () => app(CotizacionService::class)->vencerExpiradas())
     ->dailyAt('00:00')
     ->description('Vencer cotizaciones expiradas');
 
+// Alertas de inventario: mercancía olvidada en recepción y resumen antirrobo del día anterior.
+Schedule::command('inventario:alertas')
+    ->dailyAt('07:30')
+    ->withoutOverlapping()
+    ->description('Alertas diarias de inventario y control');
+
 Schedule::command('license:refresh')
     ->everyFourHours()
     ->description('Revalidar licencias de todas las empresas');

@@ -39,7 +39,7 @@ class Venta extends Model
         'estado', 'estado_fiscal', 'ecf_track_id',
         'pac_id', 'codigo_seguridad', 'dgii_url', 'xml_url', 'ambiente',
         'ecf_enviado_en', 'ecf_fecha_firma', 'ecf_respuesta',
-        'motivo_anulacion', 'anulada_en', 'tipo_anulacion_608',
+        'motivo_anulacion', 'anulada_en', 'anulada_por', 'tipo_anulacion_608',
         // Devolución (la nota de crédito): cómo y cuánto se reembolsó, y cuánto se rebajó de la CxC.
         'forma_reembolso', 'monto_reembolso', 'monto_rebaja_cxc',
     ];

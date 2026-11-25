@@ -314,6 +314,35 @@
       </section>
 
       <section class="pt-der">
+        {{-- Pedidos a caja: el vendedor de piso los envió a nombre del cliente --}}
+        @if ($this->puedeCobrarPedidos())
+          @if ($pedidoId)
+            <div class="pt-pedido-cargado" style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;padding:.6rem .8rem;margin-bottom:.5rem;border-radius:.6rem;background:var(--pt-card-2)">
+              <span><strong>Cobrando pedido</strong> {{ $pedidoEtiqueta }}</span>
+              <button type="button" wire:click="soltarPedido">Soltar</button>
+            </div>
+          @else
+            <div x-data="{ abierto: false }" style="position:relative;margin-bottom:.5rem">
+              <button type="button" style="width:100%" x-on:click="abierto = !abierto; $nextTick(() => $refs.buscaPedido?.focus())">
+                PEDIDOS EN ESPERA
+                @php $nPedidos = $this->pedidosPendientes()->count(); @endphp
+                @if ($nPedidos > 0)<span class="pt-primario" style="margin-left:.4rem;padding:0 .5rem;border-radius:999px">{{ $nPedidos }}</span>@endif
+              </button>
+              <div x-show="abierto" x-on:click.outside="abierto = false" class="pt-resultados" style="top:52px">
+                <input type="text" x-ref="buscaPedido" placeholder="¿A nombre de quién? o número..." wire:model.live.debounce.300ms="busquedaPedido" style="width:100%;margin-bottom:.4rem" />
+                @forelse ($this->pedidosPendientes() as $pedido)
+                  <button type="button" wire:key="ped-{{ $pedido->id }}" wire:click="cargarPedido({{ $pedido->id }})" x-on:click="abierto = false">
+                    <span><strong>{{ $pedido->nombre_cliente }}</strong> <span class="pt-muted">{{ $pedido->etiquetaNumero() }}</span></span>
+                    <span class="pt-muted">{{ $pedido->detalles_count }} art. · RD$ {{ number_format((float) $pedido->total_estimado, 2) }}</span>
+                  </button>
+                @empty
+                  <p class="pt-muted" style="padding:.75rem">No hay pedidos pendientes.</p>
+                @endforelse
+              </div>
+            </div>
+          @endif
+        @endif
+
         {{-- Búsqueda: nombre o código de barras (el lector USB "teclea" y manda Enter) --}}
         <div class="pt-busqueda">
           <input

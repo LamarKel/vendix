@@ -31,7 +31,7 @@ class ListRequisiciones extends ListRecords
                 ->modalSubmitActionLabel('Enviar requisición')
                 ->schema([
                     Select::make('localidad_destino_id')->label('¿Para qué localidad? (la tuya)')
-                        ->options(fn () => RequisicionResource::opcionesLocalidades(soloMiSucursal: true))->required()->native(false),
+                        ->options(fn () => RequisicionResource::opcionesLocalidades(soloMiSucursal: true, sinRecepcion: true))->required()->native(false),
                     Select::make('localidad_origen_id')->label('¿A quién se lo pides?')
                         ->options(fn () => RequisicionResource::opcionesLocalidades())->required()->live()->native(false),
                     RequisicionResource::repeaterProductos(),
@@ -67,7 +67,7 @@ class ListRequisiciones extends ListRecords
                     Select::make('localidad_origen_id')->label('Desde')
                         ->options(fn () => RequisicionResource::opcionesLocalidades(soloMiSucursal: true))->required()->live()->native(false),
                     Select::make('localidad_destino_id')->label('Hacia')
-                        ->options(fn () => RequisicionResource::opcionesLocalidades(soloMiSucursal: true))->required()->native(false),
+                        ->options(fn () => RequisicionResource::opcionesLocalidades(soloMiSucursal: true, sinRecepcion: true))->required()->native(false),
                     RequisicionResource::repeaterProductos(),
                     Textarea::make('notas')->label('Notas')->maxLength(500)->rows(2),
                 ])

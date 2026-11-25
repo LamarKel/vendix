@@ -279,10 +279,14 @@ class RequisicionService
             throw new RuntimeException('El origen y el destino deben ser localidades distintas.');
         }
 
-        return [
-            $this->localidades->localidadDeEmpresa($empresa, $origenId),
-            $this->localidades->localidadDeEmpresa($empresa, $destinoId),
-        ];
+        $origen = $this->localidades->localidadDeEmpresa($empresa, $origenId);
+        $destino = $this->localidades->localidadDeEmpresa($empresa, $destinoId);
+
+        if ($destino->tipo === \App\Enums\TipoLocalidad::RECEPCION) {
+            throw new RuntimeException("{$destino->nombre} es la localidad de recepción: ahí solo entra mercancía al registrar una compra.");
+        }
+
+        return [$origen, $destino];
     }
 
     /** @return array<int, array{producto_id: int, producto: Producto, cantidad: string}> */

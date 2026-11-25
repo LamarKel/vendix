@@ -166,13 +166,14 @@ class RequisicionResource extends Resource
      *
      * @return array<string, array<int, string>>
      */
-    public static function opcionesLocalidades(bool $soloMiSucursal = false): array
+    public static function opcionesLocalidades(bool $soloMiSucursal = false, bool $sinRecepcion = false): array
     {
         $sucursal = static::sucursalUsuario();
 
         return Localidad::query()
             ->where('empresa_id', Filament::getTenant()->id)
             ->where('activa', true)
+            ->when($sinRecepcion, fn ($q) => $q->where('tipo', '!=', \App\Enums\TipoLocalidad::RECEPCION->value))
             ->when($soloMiSucursal && $sucursal !== null, fn ($q) => $q->where('sucursal_id', $sucursal))
             ->with('sucursal:id,nombre')
             ->orderBy('sucursal_id')->orderBy('nombre')

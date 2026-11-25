@@ -275,4 +275,27 @@ class PedidoVentaTest extends TestCase
             ->assertCanSeeTableRecords([$propio])
             ->assertCanNotSeeTableRecords([$ajeno]);
     }
+
+    public function test_el_pos_tactil_carga_y_cobra_el_pedido(): void
+    {
+        $pedido = $this->crearPedido('Pedro', 3);
+        $caja = \App\Models\Caja::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Caja 1', 'activo' => true]);
+        app(ArqueoCajaService::class)->abrir('0', $this->admin->id, $this->empresaDefault, $caja);
+
+        Livewire::actingAs($this->admin)
+            ->test(\App\Filament\Pages\PuntoDeVentaTouch::class)
+            ->call('seleccionarCaja', $caja->id)
+            ->assertSee('PEDIDOS EN ESPERA')
+            ->call('cargarPedido', $pedido->id)
+            ->assertSet('pedidoId', $pedido->id)
+            ->assertSet('carrito.0.cantidad', '3')
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO_FISICA->value)
+            ->set('formaPago', 'efectivo')
+            ->set('montoEfectivo', '5000')
+            ->call('cobrar')
+            ->assertSet('pedidoId', null);
+
+        $this->assertSame(EstadoPedidoVenta::COBRADO, $pedido->fresh()->estado);
+        $this->assertSame($caja->id, $pedido->fresh()->venta->caja_id);
+    }
 }

@@ -569,4 +569,10 @@ class PuntoDeVentaTouch extends PuntoDeVenta
     {
         return $this->cajaSeleccionada();
     }
+
+    public function cargarPedido(int $pedidoId): void
+    {
+        parent::cargarPedido($pedidoId);
+        $this->lineaSeleccionada = null;
+    }
 }

@@ -55,6 +55,10 @@ class EmpresaConfiguracion extends Model
         'compras_a_recepcion',
         'requisicion_sucursal_requiere_aprobacion',
         'dias_alerta_recepcion',
+        'antirrobo_umbral_anulaciones',
+        'antirrobo_umbral_descuentos',
+        'antirrobo_umbral_devoluciones',
+        'antirrobo_umbral_ajustes',
         'textos_documentos',
     ];
 
@@ -78,6 +82,10 @@ class EmpresaConfiguracion extends Model
         'compras_a_recepcion' => 'boolean',
         'requisicion_sucursal_requiere_aprobacion' => 'boolean',
         'dias_alerta_recepcion' => 'integer',
+        'antirrobo_umbral_anulaciones' => 'integer',
+        'antirrobo_umbral_descuentos' => 'decimal:2',
+        'antirrobo_umbral_devoluciones' => 'integer',
+        'antirrobo_umbral_ajustes' => 'decimal:2',
     ];
 
     // Reflejan los defaults de la columna en la migración: sin esto, un ::create()/firstOrCreate()
@@ -103,6 +111,10 @@ class EmpresaConfiguracion extends Model
         'compras_a_recepcion' => false,
         'requisicion_sucursal_requiere_aprobacion' => false,
         'dias_alerta_recepcion' => 3,
+        'antirrobo_umbral_anulaciones' => 3,
+        'antirrobo_umbral_descuentos' => '1000',
+        'antirrobo_umbral_devoluciones' => 3,
+        'antirrobo_umbral_ajustes' => '2000',
     ];
 
     /**

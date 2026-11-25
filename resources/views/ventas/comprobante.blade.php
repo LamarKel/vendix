@@ -180,10 +180,9 @@
 
     <div class="clear"></div>
 
-    @if ($venta->esElectronica() && ! $venta->estado_fiscal?->esAceptado())
+    @if ($leyendaFiscal ?? null)
         <p style="margin-top: 12px; border: 1px solid #999; padding: 6px; text-align: center;">
-            <strong>e-CF pendiente de validación por la DGII.</strong>
-            Este documento aún no tiene validez fiscal; solicite el comprobante definitivo.
+            <strong>{{ $leyendaFiscal }}</strong>
         </p>
     @endif
 

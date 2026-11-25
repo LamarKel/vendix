@@ -200,8 +200,11 @@ Flujo: `VentaService` → `VentaObserver` → `EnviarEcfJob` (cola `ecf`) →
 - `CodigoModificacion` en NC: 1 = anulación total, 3 = corrección de montos (parcial o manual).
 - `ecf_fecha_firma` (datetime, nullable) se extrae de la respuesta del PAC; si no viene y el
   e-CF quedó aceptado, se lee `FechaHoraFirma` del XML firmado. Se muestra en PDF y ticket.
-- Impresos: el QR solo sale con el e-CF aceptado; mientras no lo esté, PDF y ticket llevan el
-  aviso "pendiente de validación". El monto exento se muestra en su propia línea.
+- Impresos (`App\Support\RepresentacionImpresa`, misma regla en PDF, ticket y térmica): el QR
+  sale en cuanto el e-CF está FIRMADO (tiene código de seguridad), aceptado o no — el código
+  sale de la firma, no de la DGII. Mientras no esté aceptado lleva la leyenda oficial de
+  contingencia (72 horas). Rechazado: sin QR y con aviso. Si el PAC no trae `dgii_url`, la URL se
+  arma con el formato ConsultaTimbre/ConsultaTimbreFC. El monto exento va en su propia línea.
 - `EcfBuilder` recorta `NombreItem` a 80 caracteres y nunca declara en efectivo más que el total.
 - Comando de diagnóstico: `php artisan ecf:diagnostico {venta_id}` (solo lectura, no envía nada).
 

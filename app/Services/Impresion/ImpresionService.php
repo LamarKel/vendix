@@ -177,10 +177,20 @@ class ImpresionService
             $printer->setJustification(Printer::JUSTIFY_LEFT);
         }
 
-        if ($venta->dgii_url !== null) {
+        // Misma regla que el PDF y el ticket del navegador (App\Support\RepresentacionImpresa).
+        $leyenda = \App\Support\RepresentacionImpresa::leyenda($venta);
+        if ($leyenda !== null) {
             $printer->text(str_repeat('-', $columnas)."\n");
             $printer->setJustification(Printer::JUSTIFY_CENTER);
-            $printer->qrCode($venta->dgii_url, Printer::QR_ECLEVEL_L, 5);
+            $printer->text(\Illuminate\Support\Str::ascii($leyenda)."\n");
+            $printer->setJustification(Printer::JUSTIFY_LEFT);
+        }
+
+        $urlTimbre = \App\Support\RepresentacionImpresa::urlTimbre($venta);
+        if ($urlTimbre !== null) {
+            $printer->text(str_repeat('-', $columnas)."\n");
+            $printer->setJustification(Printer::JUSTIFY_CENTER);
+            $printer->qrCode($urlTimbre, Printer::QR_ECLEVEL_L, 5);
             $printer->text("Codigo de seguridad:\n");
             $printer->setEmphasis(true);
             $printer->text("{$venta->codigo_seguridad}\n");

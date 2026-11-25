@@ -126,10 +126,9 @@
             @endif
         @endif
 
-        @if ($venta->esElectronica() && ! $venta->estado_fiscal?->esAceptado())
+        @if ($leyendaFiscal ?? null)
             <div class="separador"></div>
-            <p class="centro negrita">e-CF PENDIENTE DE VALIDACIÓN DGII</p>
-            <p class="centro">Sin validez fiscal hasta su aceptación.</p>
+            <p class="centro negrita">{{ $leyendaFiscal }}</p>
         @endif
 
         @if ($qrTimbre)

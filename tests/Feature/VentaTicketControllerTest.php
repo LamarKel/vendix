@@ -236,17 +236,34 @@ class VentaTicketControllerTest extends TestCase
             ->assertForbidden();
     }
 
-    /** Un e-CF que la DGII aún no aceptó se imprime con el aviso y sin QR. */
-    public function test_el_ticket_de_un_ecf_no_aceptado_avisa_que_esta_pendiente_y_no_muestra_qr(): void
+    /** Un e-CF firmado que la DGII aún no aceptó sale con QR y la leyenda de contingencia. */
+    public function test_el_ticket_de_un_ecf_no_aceptado_lleva_qr_y_leyenda_de_contingencia(): void
     {
+        \SimpleSoftwareIO\QrCode\Facades\QrCode::shouldReceive('format->size->generate')
+            ->once()->with('https://dgii.test/timbre/1')->andReturn('png');
+
         $usuario = $this->usuarioConPermiso();
         $venta = $this->crearVentaConDetalle();
-        $venta->update(['estado_fiscal' => EstadoFiscal::PENDIENTE, 'dgii_url' => 'https://dgii.test/timbre/1']);
+        $venta->update(['estado_fiscal' => EstadoFiscal::PENDIENTE, 'dgii_url' => 'https://dgii.test/timbre/1', 'codigo_seguridad' => 'AbC123']);
 
         $this->actingAs($usuario)
             ->get(route('ventas.ticket', $venta))
             ->assertOk()
-            ->assertSee('PENDIENTE DE VALIDACIÓN')
+            ->assertSee('modalidad de Contingencia')
+            ->assertSee('QR del timbre fiscal');
+    }
+
+    /** Un e-CF rechazado no lleva QR. */
+    public function test_el_ticket_de_un_ecf_rechazado_no_lleva_qr(): void
+    {
+        $usuario = $this->usuarioConPermiso();
+        $venta = $this->crearVentaConDetalle();
+        $venta->update(['estado_fiscal' => EstadoFiscal::RECHAZADO, 'dgii_url' => 'https://dgii.test/timbre/1', 'codigo_seguridad' => 'AbC123']);
+
+        $this->actingAs($usuario)
+            ->get(route('ventas.ticket', $venta))
+            ->assertOk()
+            ->assertSee('RECHAZADO')
             ->assertDontSee('QR del timbre fiscal');
     }
 }

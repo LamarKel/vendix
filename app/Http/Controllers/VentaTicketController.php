@@ -28,9 +28,8 @@ class VentaTicketController extends Controller
             'venta' => $venta,
             'empresa' => $venta->empresa,
             'anchoPapel' => AnchoPapel::tryFrom((string) $request->query('ancho')) ?? AnchoPapel::MM80,
-            'qrTimbre' => $venta->dgii_url !== null && $venta->estado_fiscal?->esAceptado()
-                ? base64_encode((string) QrCode::format('png')->size(120)->generate($venta->dgii_url))
-                : null,
+            'qrTimbre' => \App\Support\RepresentacionImpresa::qrBase64($venta),
+            'leyendaFiscal' => \App\Support\RepresentacionImpresa::leyenda($venta),
         ]);
     }
 }

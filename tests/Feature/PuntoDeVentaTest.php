@@ -374,10 +374,18 @@ class PuntoDeVentaTest extends TestCase
             'activo' => true,
         ]);
 
+        $this->supervisorConPin('4321');
+
         Livewire::actingAs($this->vendedor())
             ->test(PuntoDeVenta::class)
             ->call('agregarProducto', $producto->id)
             ->set('descuentoId', (string) $descuento->id)
+            // Sin autorización del supervisor el descuento no se aplica.
+            ->assertSet('totales.descuento', '0.00')
+            ->call('autorizarDescuento', '0000')
+            ->assertSet('descuentoAutorizadoPor', null)
+            ->assertSet('totales.descuento', '0.00')
+            ->call('autorizarDescuento', '4321')
             ->assertSet('totales.descuento', '10.00')
             // El ITBIS va sobre la base ya descontada: 18% de 90 = 16.20 (no de 100).
             ->assertSet('totales.total_itbis', '16.20')
@@ -485,15 +493,92 @@ class PuntoDeVentaTest extends TestCase
             'porcentaje' => 10,
             'activo' => true,
         ]);
+        $this->supervisorConPin('4321');
 
         Livewire::actingAs($this->vendedor())
             ->test(PuntoDeVenta::class)
             ->call('abrirCaja', '500.00')
             ->call('agregarProducto', $producto->id)
             ->set('descuentoId', (string) $descuento->id)
+            ->call('autorizarDescuento', '4321')
             ->call('cobrar')
             ->assertSet('descuentoId', '')
+            ->assertSet('descuentoAutorizadoPor', null)
             ->assertSet('descuentoGlobal', '0.00');
+
+        $venta = Venta::sole();
+        $this->assertEquals(10, (float) $venta->descuento);
+        $this->assertSame($this->supervisor->id, $venta->descuento_autorizado_por);
+    }
+
+    public function test_sin_pin_de_supervisor_no_se_cobra_con_descuento_y_cambiarlo_pide_autorizar_de_nuevo(): void
+    {
+        $this->habilitarSecuenciaNcfDeConsumo();
+        $producto = $this->producto();
+        $d10 = Descuento::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Empleado', 'porcentaje' => 10, 'activo' => true]);
+        $d50 = Descuento::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Liquidación', 'porcentaje' => 50, 'activo' => true]);
+        $this->supervisorConPin('4321');
+
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('abrirCaja', '500.00')
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $d10->id)
+            ->call('cobrar');
+        $this->assertSame(0, Venta::count());
+
+        // Autoriza el 10% y luego el cajero cambia al 50%: la autorización se pierde.
+        Livewire::actingAs($this->vendedor())
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $d10->id)
+            ->call('autorizarDescuento', '4321')
+            ->set('descuentoId', (string) $d50->id)
+            ->assertSet('descuentoAutorizadoPor', null)
+            ->assertSet('totales.descuento', '0.00');
+    }
+
+    public function test_el_pin_de_un_usuario_sin_permiso_de_supervisor_no_autoriza(): void
+    {
+        $producto = $this->producto();
+        $descuento = Descuento::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Empleado', 'porcentaje' => 10, 'activo' => true]);
+        $cajero = $this->vendedor();
+        $cajero->update(['pin_autorizacion' => \Illuminate\Support\Facades\Hash::make('9999')]);
+
+        Livewire::actingAs($cajero)
+            ->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)
+            ->set('descuentoId', (string) $descuento->id)
+            ->call('autorizarDescuento', '9999')
+            ->assertSet('descuentoAutorizadoPor', null)
+            ->assertSet('totales.descuento', '0.00');
+    }
+
+    public function test_el_pin_se_bloquea_tras_cinco_intentos_fallidos(): void
+    {
+        $producto = $this->producto();
+        $descuento = Descuento::create(['empresa_id' => $this->empresaDefault->id, 'nombre' => 'Empleado', 'porcentaje' => 10, 'activo' => true]);
+        $this->supervisorConPin('4321');
+        $pos = Livewire::actingAs($this->vendedor())->test(PuntoDeVenta::class)
+            ->call('agregarProducto', $producto->id)->set('descuentoId', (string) $descuento->id);
+
+        foreach (range(1, 5) as $i) {
+            $pos->call('autorizarDescuento', '1111');
+        }
+
+        // Aun con el PIN correcto, está bloqueado por un minuto.
+        $pos->call('autorizarDescuento', '4321')->assertSet('descuentoAutorizadoPor', null);
+    }
+
+    private ?\App\Models\User $supervisor = null;
+
+    private function supervisorConPin(string $pin): \App\Models\User
+    {
+        $this->seed(\Database\Seeders\RolePermissionSeeder::class);
+        $this->supervisor = \App\Models\User::factory()->create(['empresa_id' => $this->empresaDefault->id, 'name' => 'Supervisora Rosa', 'pin_autorizacion' => \Illuminate\Support\Facades\Hash::make($pin)]);
+        app(\App\Services\RolesEmpresaService::class)->asignarAdministrador($this->supervisor, $this->empresaDefault);
+
+        return $this->supervisor;
     }
 
     private function habilitarSecuenciaNcfDeConsumo(): void

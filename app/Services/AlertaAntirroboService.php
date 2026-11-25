@@ -38,7 +38,7 @@ class AlertaAntirroboService
     /**
      * Ranking por persona del período.
      *
-     * @return Collection<int, array{usuario: string, anulaciones: int, descuentos: float, devoluciones: int, faltante_caja: float, ajustes: float}>
+     * @return Collection<int, array{usuario: string, anulaciones: int, descuentos: float, descuentos_autorizados: float, devoluciones: int, faltante_caja: float, ajustes: float}>
      */
     public function ranking(Empresa $empresa, CarbonInterface $desde, CarbonInterface $hasta): Collection
     {
@@ -49,7 +49,7 @@ class AlertaAntirroboService
             if ($userId === null) {
                 return;
             }
-            $filas[$userId] ??= ['anulaciones' => 0, 'descuentos' => 0.0, 'devoluciones' => 0, 'faltante_caja' => 0.0, 'ajustes' => 0.0];
+            $filas[$userId] ??= ['anulaciones' => 0, 'descuentos' => 0.0, 'descuentos_autorizados' => 0.0, 'devoluciones' => 0, 'faltante_caja' => 0.0, 'ajustes' => 0.0];
             $filas[$userId][$campo] += $valor;
         };
 
@@ -65,6 +65,12 @@ class AlertaAntirroboService
             ->leftJoinSub($descLinea, 'dl', 'dl.venta_id', '=', 'ventas.id')
             ->selectRaw('ventas.user_id as uid, SUM(ventas.descuento + COALESCE(dl.d, 0)) as total')->groupBy('ventas.user_id')
             ->get()->each(fn ($r) => $sumar($r->uid, 'descuentos', (float) $r->total));
+
+        // Descuentos de tabla maestra, por el supervisor que los autorizó con su PIN.
+        Venta::query()->where('empresa_id', $empresa->id)->where('estado', '!=', EstadoVenta::ANULADA)
+            ->whereNotNull('descuento_autorizado_por')->whereBetween('fecha', $rango)
+            ->selectRaw('descuento_autorizado_por as uid, SUM(descuento) as total')->groupBy('descuento_autorizado_por')
+            ->get()->each(fn ($r) => $sumar($r->uid, 'descuentos_autorizados', (float) $r->total));
 
         Venta::query()->where('empresa_id', $empresa->id)->whereNotNull('venta_modificada_id')
             ->whereIn('tipo_comprobante', [TipoComprobante::NOTA_CREDITO->value, TipoComprobante::NOTA_CREDITO_FISICA->value])
@@ -114,7 +120,8 @@ class AlertaAntirroboService
         $dinero = fn ($v) => 'RD$ '.number_format((float) $v, 2);
         $agregar('anulaciones', (float) $c->antirrobo_umbral_anulaciones, 'Muchas anulaciones de ventas', fn ($v) => "{$v} anuladas");
         $agregar('devoluciones', (float) $c->antirrobo_umbral_devoluciones, 'Muchas devoluciones de clientes', fn ($v) => "{$v} devoluciones");
-        $agregar('descuentos', (float) $c->antirrobo_umbral_descuentos, 'Descuentos altos', $dinero);
+        $agregar('descuentos', (float) $c->antirrobo_umbral_descuentos, 'Descuentos altos (por cajero)', $dinero);
+        $agregar('descuentos_autorizados', (float) $c->antirrobo_umbral_descuentos, 'Descuentos altos autorizados (por supervisor)', $dinero);
         $agregar('faltante_caja', 0.01, 'Faltantes en cierre de caja', $dinero);
         $agregar('ajustes', (float) $c->antirrobo_umbral_ajustes, 'Salidas por ajuste o merma', $dinero);
 

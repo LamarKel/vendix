@@ -411,7 +411,6 @@
             <div class="pt-display-buffer" x-text="buffer || '0'"></div>
             <div class="pt-modos">
               <button type="button" x-bind:class="modo === 'cantidad' && 'pt-primario'" x-on:click="modo = 'cantidad'">Cantidad</button>
-              <button type="button" x-bind:class="modo === 'descuento' && 'pt-primario'" x-on:click="modo = 'descuento'">Desc. RD$</button>
             </div>
             <p class="pt-muted" style="font-size:.8rem;line-height:1.3">
               Teclea y toca un producto para agregar esa cantidad (o el peso), o selecciona una línea y pulsa ⏎.
@@ -517,6 +516,16 @@
                 <option value="{{ $descuento->id }}">{{ $descuento->nombre }} ({{ number_format((float) $descuento->porcentaje, 2) }}%)</option>
               @endforeach
             </select>
+            @if (filled($descuentoId))
+              @if ($this->descuentoAutorizado())
+                <p class="pt-muted" style="margin-top:.4rem">✔ Autorizado por <strong>{{ $descuentoAutorizadoNombre }}</strong></p>
+              @else
+                <div x-data="{ pin: '' }" style="display:flex;gap:.4rem;margin-top:.4rem">
+                  <input type="password" inputmode="numeric" maxlength="8" placeholder="PIN del supervisor" x-model="pin" autocomplete="off" />
+                  <button type="button" class="pt-primario" x-on:click="$wire.autorizarDescuento(pin); pin = ''">Autorizar</button>
+                </div>
+              @endif
+            @endif
           </div>
         @endif
 

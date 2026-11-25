@@ -65,6 +65,24 @@ class UserResource extends Resource
                 ->dehydrateStateUsing(fn ($state) => Hash::make($state))
                 ->required(fn (string $operation): bool => $operation === 'create'),
 
+            TextInput::make('pin_autorizacion')
+                ->label('PIN de supervisor')
+                ->helperText('Solo para quien autoriza descuentos (4 a 8 números). Déjalo vacío para no cambiarlo.')
+                ->password()
+                ->revealable()
+                ->rule(fn (?\App\Models\User $record) => function (string $atributo, $valor, \Closure $falla) use ($record) {
+                    if (blank($valor)) {
+                        return;
+                    }
+                    try {
+                        app(\App\Services\AutorizacionSupervisorService::class)->validarPinNuevo(Filament::getTenant(), (string) $valor, $record?->id);
+                    } catch (\RuntimeException $e) {
+                        $falla($e->getMessage());
+                    }
+                })
+                ->dehydrated(fn ($state) => filled($state))
+                ->dehydrateStateUsing(fn ($state) => Hash::make($state)),
+
             Select::make('roles')
                 ->label('Roles')
                 // El Select no se scopea solo: relationship() arma sus opciones consultando

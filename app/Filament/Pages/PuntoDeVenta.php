@@ -125,6 +125,16 @@ class PuntoDeVenta extends Page
 
     public string $busquedaPedido = '';
 
+    /**
+     * Supervisor que autorizó el descuento elegido (con su PIN). #[Locked]: el navegador no puede
+     * escribirlo; solo autorizarDescuento() lo fija y cualquier cambio de descuento lo borra.
+     */
+    #[\Livewire\Attributes\Locked]
+    public ?int $descuentoAutorizadoPor = null;
+
+    #[\Livewire\Attributes\Locked]
+    public string $descuentoAutorizadoNombre = '';
+
     public static function modulo(): Modulo
     {
         return Modulo::VENTAS_POS;
@@ -163,10 +173,10 @@ class PuntoDeVenta extends Page
             Notification::make()->title('Ese descuento ya no está disponible.')->warning()->send();
         }
 
-        if ($name === 'descuentoId' && filled($this->descuentoId) && ! $this->puedeAplicarDescuento()) {
-            $this->descuentoId = '';
-
-            Notification::make()->title('No tiene permiso para aplicar descuentos.')->warning()->send();
+        // Cambiar (o quitar) el descuento invalida la autorización anterior: hay que pedirla de nuevo.
+        if ($name === 'descuentoId') {
+            $this->descuentoAutorizadoPor = null;
+            $this->descuentoAutorizadoNombre = '';
         }
 
         if ($name === 'clienteId') {
@@ -663,6 +673,10 @@ class PuntoDeVenta extends Page
         $this->carrito = [];
         $this->pedidoId = null;
         $this->pedidoEtiqueta = '';
+        $this->descuentoAutorizadoPor = null;
+        $this->descuentoAutorizadoNombre = '';
+        $this->descuentoAutorizadoPor = null;
+        $this->descuentoAutorizadoNombre = '';
         $this->descuentoId = '';
         $this->descuentoGlobal = '0.00';
         $this->busquedaProducto = '';
@@ -850,12 +864,9 @@ class PuntoDeVenta extends Page
     }
 
     /** @return Collection<int, Descuento> */
+    /** Cualquier cajero elige de la tabla maestra; aplicar requiere el PIN de un supervisor. */
     public function descuentosDisponibles(): Collection
     {
-        if (! auth()->user()?->can('ventas.aplicar_descuento')) {
-            return collect();
-        }
-
         return Descuento::query()
             ->where('empresa_id', $this->empresaId())
             ->where('activo', true)
@@ -983,8 +994,10 @@ class PuntoDeVenta extends Page
         // Última barrera antes de registrar: precios, factor y descuentos según el servidor.
         $this->sanearCarrito();
 
-        if (filled($this->descuentoId) && ! $this->puedeAplicarDescuento()) {
-            $this->descuentoId = '';
+        if (filled($this->descuentoId) && ! $this->descuentoAutorizado()) {
+            Notification::make()->title('El descuento necesita la autorización de un supervisor (PIN).')->danger()->send();
+
+            return;
         }
 
         if ($this->pedidoId !== null && ! $this->puedeCobrarPedidos()) {
@@ -1000,7 +1013,8 @@ class PuntoDeVenta extends Page
                 'user_id' => auth()->id(),
                 'tipo_comprobante' => $this->esSinComprobante() ? null : $this->tipoComprobante,
                 'sin_comprobante' => $this->esSinComprobante(),
-                'descuento_id' => filled($this->descuentoId) ? (int) $this->descuentoId : null,
+                'descuento_id' => $this->descuentoAutorizado() ? (int) $this->descuentoId : null,
+                'descuento_autorizado_por' => $this->descuentoAutorizado() ? $this->descuentoAutorizadoPor : null,
                 'forma_pago' => $this->formaPago,
                 ...$this->datosDesglosePago(),
                 'arqueo_caja_id' => $this->arqueoAbierto()?->id,
@@ -1079,6 +1093,8 @@ class PuntoDeVenta extends Page
         $this->carrito = [];
         $this->pedidoId = null;
         $this->pedidoEtiqueta = '';
+        $this->descuentoAutorizadoPor = null;
+        $this->descuentoAutorizadoNombre = '';
         $this->descuentoId = '';
         $this->descuentoGlobal = '0.00';
         $this->busquedaProducto = '';
@@ -1285,10 +1301,44 @@ class PuntoDeVenta extends Page
         return OrigenVenta::POS;
     }
 
-    /** El permiso se exige en el servidor: ocultar el campo en pantalla no impide enviarlo. */
+    /**
+     * Descuentos por línea libres: NO existen. Los descuentos salen solo de la tabla maestra
+     * (descuento global) y con PIN de supervisor. Se exige en el servidor (sanearCarrito pone 0).
+     */
     public function puedeAplicarDescuento(): bool
     {
-        return (bool) auth()->user()?->can('ventas.aplicar_descuento');
+        return false;
+    }
+
+    /** El descuento elegido sigue siendo el que el supervisor autorizó. */
+    public function descuentoAutorizado(): bool
+    {
+        return filled($this->descuentoId) && $this->descuentoAutorizadoPor !== null && $this->descuentoSeleccionado() !== null;
+    }
+
+    /** El supervisor teclea su PIN: si tiene el permiso, queda registrado como quien autorizó. */
+    public function autorizarDescuento(string $pin): void
+    {
+        if (blank($this->descuentoId) || $this->descuentoSeleccionado() === null) {
+            Notification::make()->title('Elige primero un descuento de la lista.')->warning()->send();
+
+            return;
+        }
+
+        try {
+            $supervisor = app(\App\Services\AutorizacionSupervisorService::class)
+                ->autorizar($this->empresa(), auth()->user(), $pin, 'ventas.autorizar_descuento');
+        } catch (\RuntimeException $e) {
+            Notification::make()->title($e->getMessage())->danger()->send();
+
+            return;
+        }
+
+        $this->descuentoAutorizadoPor = $supervisor->id;
+        $this->descuentoAutorizadoNombre = $supervisor->name;
+        $this->recalcularTotales();
+
+        Notification::make()->title("Descuento autorizado por {$supervisor->name}")->success()->send();
     }
 
     /**
@@ -1404,7 +1454,7 @@ class PuntoDeVenta extends Page
             // El servicio resuelve el descuento internamente a partir del descuento_id:
             // valida que pertenezca a la empresa, que esté activo, y calcula el monto.
             $this->totales = app(VentaService::class)->previsualizar([
-                'descuento_id' => filled($this->descuentoId) ? (int) $this->descuentoId : null,
+                'descuento_id' => $this->descuentoAutorizado() ? (int) $this->descuentoId : null,
                 'lineas' => $lineas,
             ], $this->empresa());
             $this->descuentoGlobal = $this->totales['descuento'];

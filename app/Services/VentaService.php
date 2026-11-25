@@ -241,6 +241,7 @@ class VentaService
                 'subtotal' => $acumulado['subtotal'],
                 'descuento' => $descuentoGlobal,
                 'descuento_id' => $descuentoId,
+                'descuento_autorizado_por' => $descuentoId !== null ? $this->resolverAutorizadorDescuento($datos['descuento_autorizado_por'] ?? null, $empresa) : null,
                 'descuento_porcentaje' => $descuentoPorcentaje,
                 'monto_gravado_18' => $acumulado['monto_gravado_18'],
                 'monto_gravado_16' => $acumulado['monto_gravado_16'],
@@ -992,6 +993,23 @@ class VentaService
      *
      * @throws VentaInvalidaException
      */
+    /** Supervisor que autorizó el descuento: debe ser de la empresa y tener el permiso. */
+    private function resolverAutorizadorDescuento(mixed $userId, Empresa $empresa): ?int
+    {
+        if (blank($userId)) {
+            return null;
+        }
+
+        $usuario = User::where('empresa_id', $empresa->id)->find($userId);
+        setPermissionsTeamId($empresa->id);
+
+        if ($usuario === null || ! $usuario->can('ventas.autorizar_descuento')) {
+            throw new VentaInvalidaException('Quien autorizó el descuento no es un supervisor de esta empresa.');
+        }
+
+        return $usuario->id;
+    }
+
     /** Localidad de venta de la sucursal donde se hizo la venta (devoluciones y anulaciones vuelven ahí). */
     private function localidadVentaDe(Venta $venta): \App\Models\Localidad
     {

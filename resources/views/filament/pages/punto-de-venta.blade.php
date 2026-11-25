@@ -237,7 +237,6 @@
                   <th>Descripción</th>
                   <th class="pos-num">Cantidad</th>
                   <th class="pos-num">Precio</th>
-                  <th class="pos-num">Descuento</th>
                   <th class="pos-num">Subtotal</th>
                   <th>Acción</th>
                 </tr>
@@ -271,17 +270,6 @@
                       @endif
                     </td>
                     <td class="pos-num">RD$ {{ number_format((float) $linea['precio_unitario'], 2) }}</td>
-                    <td class="pos-num">
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        class="form-input"
-                        aria-label="Descuento de {{ $linea['nombre'] }}"
-                        @disabled(! $this->puedeAplicarDescuento())
-                        wire:model.live.debounce.400ms="carrito.{{ $indice }}.descuento"
-                      />
-                    </td>
                     <td class="pos-num">RD$ {{ number_format((float) $this->subtotalLinea($linea), 2) }}</td>
                     <td>
                       <button type="button" class="btn btn-danger" wire:click="quitarLinea({{ $indice }})">
@@ -291,7 +279,7 @@
                   </tr>
                 @empty
                   <tr>
-                    <td colspan="6" class="text-center pos-muted">
+                    <td colspan="5" class="text-center pos-muted">
                       Agrega productos al carrito buscándolos arriba.
                     </td>
                   </tr>
@@ -330,6 +318,17 @@
                 <option value="{{ $descuento->id }}">{{ $descuento->nombre }} ({{ number_format((float) $descuento->porcentaje, 2) }}%)</option>
               @endforeach
             </select>
+            @if (filled($descuentoId))
+              @if ($this->descuentoAutorizado())
+                <p class="pos-muted mt-1">✔ Autorizado por <strong>{{ $descuentoAutorizadoNombre }}</strong></p>
+              @else
+                <div class="flex gap-2 mt-1" x-data="{ pin: '' }">
+                  <input type="password" inputmode="numeric" maxlength="8" class="form-input" placeholder="PIN del supervisor" x-model="pin" autocomplete="off" />
+                  <button type="button" class="btn btn-primary" x-on:click="$wire.autorizarDescuento(pin); pin = ''">Autorizar</button>
+                </div>
+                <p class="pos-alerta mt-1" style="font-size:.8rem">El descuento no se aplica hasta que un supervisor lo autorice.</p>
+              @endif
+            @endif
           </div>
 
           <dl>

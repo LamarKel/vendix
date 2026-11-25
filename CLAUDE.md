@@ -98,9 +98,14 @@ Guía completa: `docs/instalacion-local.md`.
 
 Las propiedades públicas de Livewire (`$carrito`, `$descuentoId`...) se pueden reescribir desde el
 navegador. De ellas solo se cree QUÉ se pidió y la cantidad; precio, factor y descripción se
-vuelven a leer de la base antes de calcular y de cobrar (`PuntoDeVenta::sanearCarrito()`). Los descuentos (global y por línea) exigen
-`ventas.aplicar_descuento` en el servidor, no solo ocultar el campo. Un POS nuevo debe seguir la
-misma regla y cubrirla con un test de "carrito manipulado".
+vuelven a leer de la base antes de calcular y de cobrar (`PuntoDeVenta::sanearCarrito()`). Un POS
+nuevo debe seguir la misma regla y cubrirla con un test de "carrito manipulado".
+
+Descuentos: NO hay descuentos libres por línea (sanearCarrito pone 0). Solo el descuento global de
+la tabla maestra `descuentos`, y solo con el PIN de un supervisor (`ventas.autorizar_descuento`,
+`AutorizacionSupervisorService`, 5 intentos/minuto). La autorización vive en propiedades
+`#[Locked]` del POS, se borra al cambiar el descuento y se guarda en
+`ventas.descuento_autorizado_por`.
 
 Precio que vale en el POS, en este orden: lista de precio del cliente seleccionado (solo unidad
 base, lista activa y de la misma empresa) → precio de la presentación → precio del producto.

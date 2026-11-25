@@ -382,30 +382,10 @@ class PuntoDeVentaTouch extends PuntoDeVenta
     }
 
     /** Descuento en pesos de la línea; nunca negativo ni mayor que precio × cantidad. */
+    /** Ya no hay descuentos libres por línea: solo los de la tabla maestra, con PIN de supervisor. */
     public function establecerDescuentoLinea(int $indice, string $valor): void
     {
-        if (! isset($this->carrito[$indice])) {
-            return;
-        }
-
-        if (! $this->puedeAplicarDescuento()) {
-            Notification::make()->title('No tiene permiso para aplicar descuentos.')->warning()->send();
-
-            return;
-        }
-
-        $linea = $this->carrito[$indice];
-        $bruto = bcmul((string) $linea['precio_unitario'], (string) $linea['cantidad'], 2);
-        $descuento = bcadd((string) max(0, (float) $valor), '0', 2);
-
-        if (bccomp($descuento, $bruto, 2) >= 0) {
-            Notification::make()->title('El descuento no puede ser igual o mayor que el importe de la línea.')->danger()->send();
-
-            return;
-        }
-
-        $this->carrito[$indice]['descuento'] = $descuento;
-        $this->recalcularTotales();
+        Notification::make()->title('Los descuentos se eligen de la lista y los autoriza un supervisor.')->warning()->send();
     }
 
     public function quitarLinea(int $indice): void

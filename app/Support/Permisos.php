@@ -66,6 +66,7 @@ class Permisos
                 'facturacion.acceder' => 'Acceder a Facturación (comprobantes avanzados)',
                 'ventas.ver' => 'Ver ventas',
                 'ventas.aplicar_descuento' => 'Aplicar descuentos en POS',
+                'ventas.autorizar_descuento' => 'Autorizar descuentos con su PIN (supervisor)',
                 'ventas.anular' => 'Anular ventas',
                 'ventas.nota_debito' => 'Emitir Notas de Débito',
                 'ventas.devolucion' => 'Realizar devoluciones de clientes',

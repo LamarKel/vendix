@@ -33,7 +33,7 @@ class Venta extends Model
         'forma_pago', 'monto_efectivo', 'monto_tarjeta', 'monto_transferencia', 'vuelto',
         'arqueo_caja_id', 'caja_id',
         'fecha', 'moneda', 'tasa_cambio',
-        'subtotal', 'descuento', 'descuento_id', 'descuento_porcentaje',
+        'subtotal', 'descuento', 'descuento_id', 'descuento_autorizado_por', 'descuento_porcentaje',
         'monto_gravado_18', 'monto_gravado_16', 'monto_gravado_0', 'monto_exento',
         'itbis_18', 'itbis_16', 'total_itbis', 'total',
         'estado', 'estado_fiscal', 'ecf_track_id',

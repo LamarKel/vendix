@@ -267,10 +267,9 @@ class PuntoDeVentaTouchTest extends TestCase
             ->assertSet('carrito.0.cantidad', 2)
             ->call('sumarALinea', 0, 1)
             ->assertSet('carrito.0.cantidad', 3)
+            // Ya no hay descuentos libres por línea: solo de la tabla maestra con PIN de supervisor.
             ->call('establecerDescuentoLinea', 0, '50')
-            ->assertSet('carrito.0.descuento', '50.00')
-            ->call('establecerDescuentoLinea', 0, '300')
-            ->assertSet('carrito.0.descuento', '50.00')
+            ->assertSet('carrito.0.descuento', '0.00')
             ->call('establecerCantidadLinea', 0, '0')
             ->assertSet('carrito', []);
     }

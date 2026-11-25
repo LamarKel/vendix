@@ -26,7 +26,8 @@
             <th class="p-2">Persona</th>
             <th class="p-2 text-right">Anulaciones</th>
             <th class="p-2 text-right">Devoluciones</th>
-            <th class="p-2 text-right">Descuentos (RD$)</th>
+            <th class="p-2 text-right">Descuentos dados (RD$)</th>
+            <th class="p-2 text-right">Descuentos que autorizó (RD$)</th>
             <th class="p-2 text-right">Faltante de caja (RD$)</th>
             <th class="p-2 text-right">Ajustes y mermas (RD$)</th>
           </tr>
@@ -38,11 +39,12 @@
               <td class="p-2 text-right">{{ $f['anulaciones'] }}</td>
               <td class="p-2 text-right">{{ $f['devoluciones'] }}</td>
               <td class="p-2 text-right">{{ number_format($f['descuentos'], 2) }}</td>
+              <td class="p-2 text-right">{{ number_format($f['descuentos_autorizados'], 2) }}</td>
               <td class="p-2 text-right {{ $f['faltante_caja'] > 0 ? 'text-danger-600 font-semibold' : '' }}">{{ number_format($f['faltante_caja'], 2) }}</td>
               <td class="p-2 text-right">{{ number_format($f['ajustes'], 2) }}</td>
             </tr>
           @empty
-            <tr><td colspan="6" class="p-3 text-center text-gray-500">Sin movimientos en el período.</td></tr>
+            <tr><td colspan="7" class="p-3 text-center text-gray-500">Sin movimientos en el período.</td></tr>
           @endforelse
         </tbody>
       </table>

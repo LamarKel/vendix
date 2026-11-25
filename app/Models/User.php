@@ -29,7 +29,7 @@ class User extends Authenticatable implements FilamentUser, HasDefaultTenant, Ha
     use LogsActivity;
 
     protected $fillable = [
-        'empresa_id', 'sucursal_id',
+        'empresa_id', 'sucursal_id', 'pin_autorizacion',
         'es_super_admin',
         'name',
         'email',
@@ -40,6 +40,7 @@ class User extends Authenticatable implements FilamentUser, HasDefaultTenant, Ha
 
     protected $hidden = [
         'password',
+        'pin_autorizacion',
         'remember_token',
     ];
 

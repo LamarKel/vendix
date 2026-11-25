@@ -112,6 +112,18 @@ class CotizacionTest extends TestCase
         $this->assertEquals('COT-00002', $cot2->numero);
     }
 
+    /** Borrar la última cotización no debe hacer que la siguiente repita su número (el índice único incluye las borradas). */
+    public function test_el_numero_no_se_repite_si_la_ultima_cotizacion_se_borro(): void
+    {
+        $this->service->crear($this->datosCotizacion(), $this->admin->id, $this->empresa);
+        $cot2 = $this->service->crear($this->datosCotizacion(), $this->admin->id, $this->empresa);
+        $cot2->delete();
+
+        $cot3 = $this->service->crear($this->datosCotizacion(), $this->admin->id, $this->empresa);
+
+        $this->assertEquals('COT-00003', $cot3->numero);
+    }
+
     public function test_cotizacion_no_descuenta_stock(): void
     {
         $stockAntes = (float) $this->producto->stock;

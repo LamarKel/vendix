@@ -23,7 +23,13 @@ class CotizacionService
 
     public function generarNumero(Empresa $empresa): string
     {
-        $ultimo = Cotizacion::where('empresa_id', $empresa->id)
+        // Se llama dentro de la transacción que crea el documento: bloquear la fila de la empresa
+        // serializa la numeración, así dos usuarios guardando a la vez no chocan con el índice
+        // único (empresa_id, numero) ni ven un error.
+        Empresa::whereKey($empresa->id)->lockForUpdate()->first();
+
+        // withTrashed: el índice único incluye los borrados; sin esto se repetiría su número.
+        $ultimo = Cotizacion::withTrashed()->where('empresa_id', $empresa->id)
             ->orderByDesc('id')
             ->value('numero');
 

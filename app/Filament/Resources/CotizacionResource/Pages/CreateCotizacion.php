@@ -18,9 +18,12 @@ class CreateCotizacion extends CreateRecord
 {
     protected static string $resource = CotizacionResource::class;
 
+    /** Después de crear se va a la cotización y allí se abre el modal de imprimir. */
     protected function getRedirectUrl(): string
     {
-        return $this->getResource()::getUrl('index');
+        session()->put('cotizacion_recien_creada', $this->getRecord()->getKey());
+
+        return $this->getResource()::getUrl('view', ['record' => $this->getRecord()]);
     }
 
     protected function getCreatedNotificationTitle(): ?string

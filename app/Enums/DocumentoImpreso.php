@@ -82,10 +82,10 @@ enum DocumentoImpreso: string
     {
         return match ([$this, $campo]) {
             [self::VENTA_TICKET, 'pie'] => '¡Gracias por su compra!',
-            [self::COTIZACION, 'pie'] => 'Gracias por considerar nuestros servicios.',
-            [self::COTIZACION, 'incluye'] => 'Instalación completa del sistema, capacitación y 30 días de soporte post-instalación por WhatsApp o asistencia remota para dudas y ajustes.',
-            [self::COTIZACION, 'no_incluye'] => 'Mejoras, nuevas funcionalidades o modificaciones futuras no contempladas en el alcance inicial. Estos trabajos se cotizarán y cobrarán por separado.',
-            [self::COTIZACION, 'observaciones'] => 'Los plazos de entrega, forma de pago y vigencia de esta cotización quedan sujetos a confirmación entre las partes.',
+            [self::COTIZACION, 'pie'] => 'Gracias por su preferencia.',
+            // Incluye / No incluye quedan vacíos por defecto: son para negocios que cotizan
+            // servicios; una tienda los llena solo si los necesita.
+            [self::COTIZACION, 'observaciones'] => 'Precios sujetos a cambio sin previo aviso después de la fecha de vigencia.',
             default => null,
         };
     }

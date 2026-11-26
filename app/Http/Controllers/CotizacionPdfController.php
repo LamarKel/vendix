@@ -19,14 +19,10 @@ class CotizacionPdfController extends Controller
 
         $cotizacion->load(['empresa.configuracion', 'cliente', 'detalles.producto', 'user']);
 
-        $empresa = $cotizacion->empresa;
-        $config = $empresa->config();
-
+        // Los colores salen de la configuración de la empresa dentro de la vista (pdf._colores).
         $pdf = Pdf::loadView('cotizaciones.pdf', [
             'cotizacion' => $cotizacion,
-            'empresa' => $empresa,
-            'colorPrimario' => $config->color_primario ?? '#00C9D7',
-            'colorSecundario' => $config->color_secundario ?? '#101820',
+            'empresa' => $cotizacion->empresa,
         ]);
 
         $pdf->setPaper('letter');

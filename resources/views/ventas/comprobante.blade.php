@@ -1,223 +1,134 @@
+@php extract(\App\Support\EstiloPdf::para($empresa)); @endphp
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="utf-8">
     <title>Comprobante {{ $venta->ncf }}</title>
-    <style>
-        @page { margin: 24px 32px; }
-        body { font-family: 'Helvetica', sans-serif; font-size: 12px; color: #111827; }
-        table { width: 100%; border-collapse: collapse; }
-        .header-table { margin-bottom: 16px; }
-        .header-table td { vertical-align: top; }
-        .logo { max-width: 90px; max-height: 90px; }
-        .empresa-nombre { font-size: 16px; font-weight: bold; margin: 0 0 2px; }
-        .empresa-datos { font-size: 11px; color: #374151; margin: 0; }
-        .comprobante-box {
-            border: 1px solid #d1d5db;
-            border-radius: 4px;
-            padding: 8px 12px;
-            text-align: right;
-        }
-        .comprobante-box .tipo { font-weight: bold; font-size: 13px; margin: 0 0 4px; }
-        .comprobante-box .ncf { font-size: 13px; font-weight: bold; color: #1d4ed8; margin: 0 0 4px; }
-        .comprobante-box p { margin: 0; }
-        .anulada-banner {
-            border: 2px solid #dc2626;
-            color: #dc2626;
-            font-weight: bold;
-            text-align: center;
-            padding: 6px;
-            margin-bottom: 12px;
-            letter-spacing: 2px;
-        }
-        .cliente-box { margin-bottom: 16px; }
-        .cliente-box p { margin: 0 0 2px; }
-        .lineas { margin-top: 8px; }
-        .lineas th {
-            background-color: #f3f4f6;
-            text-align: left;
-            padding: 6px 8px;
-            font-size: 11px;
-            border-bottom: 1px solid #d1d5db;
-        }
-        .lineas td {
-            padding: 6px 8px;
-            border-bottom: 1px solid #e5e7eb;
-            font-size: 11px;
-        }
-        .text-right { text-align: right; }
-        .totales { margin-top: 12px; width: 260px; float: right; }
-        .totales td { padding: 3px 8px; font-size: 11px; }
-        .totales .total-final td {
-            border-top: 1px solid #111827;
-            font-weight: bold;
-            font-size: 13px;
-        }
-        .clear { clear: both; }
-        .timbre { margin-top: 20px; border-top: 1px solid #d1d5db; padding-top: 10px; }
-        .timbre td { vertical-align: top; }
-        .timbre .qr { width: 90px; height: 90px; }
-        .timbre .datos { font-size: 10px; color: #374151; padding-left: 12px; }
-        .timbre .datos p { margin: 0 0 3px; }
-        .footer { margin-top: 40px; font-size: 10px; color: #6b7280; text-align: center; }
-    </style>
+    @include('pdf._estilos')
 </head>
 <body>
+    <div class="pie">
+        <table><tr>
+            <td>{{ $nombreEmpresaPdf }} · {{ $venta->ncf }}</td>
+            <td style="text-align: right;">Generado con Vendix</td>
+        </tr></table>
+    </div>
+
     @if ($venta->estaAnulada())
-        <div class="anulada-banner">COMPROBANTE ANULADO</div>
+        <div class="anulada">COMPROBANTE ANULADO</div>
     @endif
 
-    <table class="header-table">
+    @include('pdf._encabezado', [
+        'titulo' => mb_strtoupper($venta->etiquetaComprobante()),
+        'numero' => $venta->ncf,
+        'datos' => [
+            'Fecha' => $venta->fecha->format('d/m/Y h:i A'),
+            'Forma de pago' => $venta->forma_pago?->etiqueta(),
+            'Atendido por' => $venta->user?->name,
+        ],
+    ])
+
+    <table class="bloque">
         <tr>
-            <td style="width: 100px;">
-                @if ($empresa->logo)
-                    @php $rutaLogo = \Illuminate\Support\Facades\Storage::disk('public')->path($empresa->logo); @endphp
-                    @if (is_file($rutaLogo))
-                        <img src="{{ $rutaLogo }}" class="logo" alt="Logo">
-                    @endif
-                @endif
-            </td>
-            <td>
-                <p class="empresa-nombre">{{ $empresa->nombre_comercial ?: $empresa->razon_social }}</p>
-                @if ($empresa->nombre_comercial && $empresa->nombre_comercial !== $empresa->razon_social)
-                    <p class="empresa-datos">{{ $empresa->razon_social }}</p>
-                @endif
-                <p class="empresa-datos">RNC: {{ $empresa->rnc }}</p>
-                @if ($empresa->direccion)
-                    <p class="empresa-datos">{{ $empresa->direccion }}</p>
-                @endif
-                @if ($empresa->telefono)
-                    <p class="empresa-datos">Tel: {{ $empresa->telefono }}</p>
-                @endif
-            </td>
-            <td style="width: 200px;">
-                <div class="comprobante-box">
-                    <p class="tipo">{{ $venta->etiquetaComprobante() }}</p>
-                    <p class="ncf">{{ $venta->ncf }}</p>
-                    <p>Fecha: {{ $venta->fecha->format('d/m/Y H:i') }}</p>
+            <td style="width: 58%; padding-right: 12px;">
+                <p class="etiqueta">Facturado a</p>
+                <div class="caja">
+                    <p class="fuerte">{{ $venta->nombreCliente() }}</p>
+                    @if ($venta->cliente?->documento)<p class="emp-dato">RNC / Cédula: {{ $venta->cliente->documento }}</p>@endif
+                    @if ($venta->cliente?->direccion)<p class="emp-dato">{{ $venta->cliente->direccion }}</p>@endif
+                    @if ($venta->cliente?->telefono)<p class="emp-dato">Tel: {{ $venta->cliente->telefono }}</p>@endif
                 </div>
+            </td>
+            <td style="width: 42%;">
+                <p class="etiqueta">Moneda</p>
+                <div class="caja"><p class="fuerte">{{ $venta->moneda === 'DOP' ? 'Pesos dominicanos (RD$)' : $venta->moneda }}</p></div>
             </td>
         </tr>
     </table>
 
-    <div class="cliente-box">
-        <p><strong>Cliente:</strong> {{ $venta->nombreCliente() }}</p>
-        @if ($venta->cliente?->documento)
-            <p><strong>Documento:</strong> {{ $venta->cliente->documento }}</p>
-        @endif
-    </div>
-
     <table class="lineas">
         <thead>
             <tr>
+                <th style="width: 6%;">#</th>
                 <th>Descripción</th>
-                <th class="text-right">Cantidad</th>
-                <th class="text-right">Precio</th>
-                <th class="text-right">ITBIS</th>
-                <th class="text-right">Subtotal</th>
+                <th class="num" style="width: 11%;">Cant.</th>
+                <th class="num" style="width: 14%;">Precio</th>
+                <th class="num" style="width: 12%;">ITBIS</th>
+                <th class="num" style="width: 15%;">Importe</th>
             </tr>
         </thead>
         <tbody>
             @foreach ($venta->detalles as $detalle)
-                <tr>
-                    <td>{{ $detalle->descripcion }}</td>
-                    <td class="text-right">{{ rtrim(rtrim(number_format((float) $detalle->cantidad, 3, '.', ''), '0'), '.') }}</td>
-                    <td class="text-right">{{ number_format((float) $detalle->precio_unitario, 2) }}</td>
-                    <td class="text-right">{{ number_format((float) $detalle->itbis_monto, 2) }}</td>
-                    <td class="text-right">{{ number_format((float) $detalle->subtotal, 2) }}</td>
+                <tr class="{{ $loop->even ? 'alt' : '' }}">
+                    <td class="codigo">{{ $loop->iteration }}</td>
+                    <td>
+                        {{ $detalle->descripcion }}
+                        @if ($detalle->producto?->codigo)<br><span class="codigo">{{ $detalle->producto->codigo }}</span>@endif
+                    </td>
+                    <td class="num">{{ rtrim(rtrim(number_format((float) $detalle->cantidad, 3, '.', ''), '0'), '.') }}</td>
+                    <td class="num">{{ number_format((float) $detalle->precio_unitario, 2) }}</td>
+                    <td class="num">{{ number_format((float) $detalle->itbis_monto, 2) }}</td>
+                    <td class="num"><b>{{ number_format((float) $detalle->subtotal, 2) }}</b></td>
                 </tr>
             @endforeach
         </tbody>
     </table>
 
-    <table class="totales">
+    <table class="resumen">
         <tr>
-            {{-- Neto: el descuento global ya va prorrateado dentro de cada línea (antes del ITBIS). --}}
-            <td>Subtotal</td>
-            <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->subtotalNeto(), 2) }}</td>
-        </tr>
-        @if ((float) $venta->monto_exento > 0)
-            <tr>
-                <td>Monto exento</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->monto_exento, 2) }}</td>
-            </tr>
-        @endif
-        @if ((float) $venta->itbis_18 > 0)
-            <tr>
-                <td>ITBIS 18%</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->itbis_18, 2) }}</td>
-            </tr>
-        @endif
-        @if ((float) $venta->itbis_16 > 0)
-            <tr>
-                <td>ITBIS 16%</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->itbis_16, 2) }}</td>
-            </tr>
-        @endif
-        @if ((float) $venta->monto_gravado_0 > 0)
-            <tr>
-                <td>Gravado 0%</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->monto_gravado_0, 2) }}</td>
-            </tr>
-        @endif
-        @if ((float) $venta->monto_exento > 0)
-            <tr>
-                <td>Exento</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->monto_exento, 2) }}</td>
-            </tr>
-        @endif
-        @if ((float) $venta->descuento > 0)
-            <tr>
-                <td>Descuento aplicado (incluido en las líneas)</td>
-                <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->descuento, 2) }}</td>
-            </tr>
-        @endif
-        <tr class="total-final">
-            <td>Total</td>
-            <td class="text-right">{{ $venta->moneda }} {{ number_format((float) $venta->total, 2) }}</td>
+            <td style="width: 58%; padding-right: 12px;">
+                @if ($leyendaFiscal ?? null)
+                    <div class="aviso" style="margin-top: 0;">{{ $leyendaFiscal }}</div>
+                @endif
+
+                @if ($qrTimbre)
+                    <table style="margin-top: 8px;">
+                        <tr>
+                            <td style="width: 92px;"><img src="data:image/png;base64,{{ $qrTimbre }}" style="width: 86px; height: 86px;" alt="QR"></td>
+                            <td style="padding-left: 8px; font-size: 8px; color: #4B5563; vertical-align: middle;">
+                                @if ($venta->codigo_seguridad)<p>Código de seguridad: <b style="color: {{ $cs }};">{{ $venta->codigo_seguridad }}</b></p>@endif
+                                @if ($venta->ecf_fecha_firma)<p style="margin-top: 2px;">Fecha de firma digital: {{ $venta->ecf_fecha_firma->format('d/m/Y H:i:s') }}</p>@endif
+                                <p style="margin-top: 2px;">Escanee el código para validar este e-CF en la DGII.</p>
+                                @if ($venta->dgii_url)<p style="margin-top: 2px; font-size: 6.5px; color: #9CA3AF; word-break: break-all;">{{ $venta->dgii_url }}</p>@endif
+                            </td>
+                        </tr>
+                    </table>
+                @endif
+            </td>
+            <td style="width: 42%;">
+                <table class="totales">
+                    <tr><td>Subtotal</td><td class="num">{{ number_format((float) $venta->subtotalNeto(), 2) }}</td></tr>
+                    @if ((float) $venta->descuento > 0)
+                        <tr><td>Descuento (incluido en líneas)</td><td class="num">-{{ number_format((float) $venta->descuento, 2) }}</td></tr>
+                    @endif
+                    @if ((float) $venta->monto_gravado_0 > 0)
+                        <tr><td>Gravado 0%</td><td class="num">{{ number_format((float) $venta->monto_gravado_0, 2) }}</td></tr>
+                    @endif
+                    @if ((float) $venta->monto_exento > 0)
+                        <tr><td>Monto exento</td><td class="num">{{ number_format((float) $venta->monto_exento, 2) }}</td></tr>
+                    @endif
+                    @if ((float) $venta->itbis_18 > 0)
+                        <tr><td>ITBIS 18%</td><td class="num">{{ number_format((float) $venta->itbis_18, 2) }}</td></tr>
+                    @endif
+                    @if ((float) $venta->itbis_16 > 0)
+                        <tr><td>ITBIS 16%</td><td class="num">{{ number_format((float) $venta->itbis_16, 2) }}</td></tr>
+                    @endif
+                    <tr class="gran"><td>TOTAL {{ $venta->moneda === 'DOP' ? 'RD$' : $venta->moneda }}</td><td class="num">{{ number_format((float) $venta->total, 2) }}</td></tr>
+                </table>
+            </td>
         </tr>
     </table>
 
-    <div class="clear"></div>
-
-    @if ($leyendaFiscal ?? null)
-        <p style="margin-top: 12px; border: 1px solid #999; padding: 6px; text-align: center;">
-            <strong>{{ $leyendaFiscal }}</strong>
-        </p>
-    @endif
-
-    @if ($qrTimbre)
-        <table class="timbre">
-            <tr>
-                <td style="width: 90px;">
-                    <img src="data:image/png;base64,{{ $qrTimbre }}" class="qr" alt="QR del timbre DGII">
-                </td>
-                <td class="datos">
-                    <p><strong>Comprobante fiscal electrónico válido.</strong></p>
-                    @if ($venta->ecf_fecha_firma)
-                        <p>Fecha de firma digital: {{ $venta->ecf_fecha_firma->format('d/m/Y H:i:s') }}</p>
-                    @endif
-                    @if ($venta->codigo_seguridad)
-                        <p>Código de seguridad: {{ $venta->codigo_seguridad }}</p>
-                    @endif
-                    <p>Consulta este e-CF en: {{ $venta->dgii_url }}</p>
-                </td>
-            </tr>
-        </table>
-    @endif
-
     @php($pie = $empresa->config()->textoDocumento(\App\Enums\DocumentoImpreso::VENTA_FACTURA))
     @if ($pie)
-        <div class="footer">{!! nl2br(e($pie)) !!}</div>
+        <p class="nota" style="text-align: center; margin-top: 18px;">{!! nl2br(e($pie)) !!}</p>
     @endif
 
     @if ($venta->estaAnulada())
-        <div class="footer">
-            Este comprobante fue anulado{{ $venta->anulada_en ? ' el ' . $venta->anulada_en->format('d/m/Y H:i') : '' }}.
-            @if ($venta->motivo_anulacion)
-                Motivo: {{ $venta->motivo_anulacion }}
-            @endif
-        </div>
+        <p class="nota" style="text-align: center; color: #DC2626;">
+            Anulado{{ $venta->anulada_en ? ' el '.$venta->anulada_en->format('d/m/Y H:i') : '' }}.
+            @if ($venta->motivo_anulacion) Motivo: {{ $venta->motivo_anulacion }} @endif
+        </p>
     @endif
 </body>
 </html>

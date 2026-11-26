@@ -8,11 +8,10 @@ use App\Enums\EstadoCotizacion;
 use App\Enums\FormaPago;
 use App\Enums\TipoComprobante;
 use App\Enums\TipoPago;
-use App\Exceptions\StockInsuficienteException;
-use App\Exceptions\VentaInvalidaException;
 use App\Filament\Resources\CotizacionResource;
 use App\Models\Cotizacion;
 use App\Services\CotizacionService;
+use App\Services\SecuenciaNcfService;
 use App\Support\MensajeError;
 use Filament\Actions\Action;
 use Filament\Actions\EditAction;
@@ -22,6 +21,7 @@ use Filament\Notifications\Notification;
 use Filament\Resources\Pages\ViewRecord;
 use Filament\Support\Icons\Heroicon;
 use RuntimeException;
+use Throwable;
 
 class ViewCotizacion extends ViewRecord
 {
@@ -79,12 +79,16 @@ class ViewCotizacion extends ViewRecord
                 ->form([
                     Select::make('tipo_comprobante')
                         ->label('Tipo de Comprobante')
-                        ->options(
-                            collect(TipoComprobante::cases())
-                                ->filter(fn (TipoComprobante $t) => $t->esDeVenta())
-                                ->mapWithKeys(fn (TipoComprobante $t) => [$t->value => $t->etiqueta()])
-                                ->all()
-                        )
+                        // Solo los que el POS ofrecería: con secuencia disponible y del régimen de
+                        // la empresa (físico o e-CF). Sin notas de crédito/débito.
+                        ->options(fn () => collect(app(SecuenciaNcfService::class)->tiposDisponibles(Filament::getTenant()))
+                            ->filter(fn (TipoComprobante $t) => $t->esDeVenta() && ! $t->esNotaCredito() && ! $t->esNotaDebito())
+                            ->mapWithKeys(fn (TipoComprobante $t) => [$t->value => "{$t->value} — {$t->etiqueta()}"])
+                            ->all())
+                        ->default(fn (Cotizacion $record) => $this->tipoSugerido($record))
+                        ->helperText(fn (Cotizacion $record) => $record->cliente?->documento
+                            ? null
+                            : 'La cotización no tiene cliente con RNC/cédula: solo aplica factura de consumo.')
                         ->required(),
 
                     Select::make('forma_pago')
@@ -120,11 +124,23 @@ class ViewCotizacion extends ViewRecord
                         );
 
                         Notification::make()
-                            ->title("Venta creada: {$venta->ncf}")
+                            ->title("Factura {$venta->ncf} creada")
+                            ->body('RD$ '.number_format((float) $venta->total, 2))
                             ->success()
+                            ->persistent()
+                            ->actions([
+                                Action::make('imprimirFactura')->label('Imprimir factura')->button()
+                                    ->url(route('ventas.pdf', $venta), shouldOpenInNewTab: true),
+                                Action::make('imprimirTicket')->label('Ticket')->link()
+                                    ->url(route('ventas.ticket', $venta), shouldOpenInNewTab: true),
+                            ])
                             ->send();
-                    } catch (RuntimeException|VentaInvalidaException|StockInsuficienteException $e) {
-                        Notification::make()->title(MensajeError::para($e))->danger()->send();
+
+                        $this->refreshFormData(['estado', 'venta_id']);
+                    } catch (Throwable $e) {
+                        // Cualquier fallo (secuencia agotada, stock, cliente sin RNC...) sale como
+                        // aviso legible; los inesperados quedan en el log con referencia.
+                        Notification::make()->title('No se pudo facturar')->body(MensajeError::para($e))->danger()->persistent()->send();
                     }
                 }),
 
@@ -152,5 +168,51 @@ class ViewCotizacion extends ViewRecord
                 ->visible(fn () => $user->can('cotizaciones.exportar'))
                 ->url(fn (Cotizacion $record) => route('cotizaciones.pdf', $record), shouldOpenInNewTab: true),
         ];
+    }
+
+    /** B01/31 si el cliente tiene documento; si no, consumo (B02/32), según lo disponible. */
+    private function tipoSugerido(Cotizacion $record): ?string
+    {
+        $disponibles = collect(app(SecuenciaNcfService::class)->tiposDisponibles(Filament::getTenant()));
+        $preferidos = $record->cliente?->documento
+            ? [TipoComprobante::FACTURA_CREDITO_FISCAL, TipoComprobante::FACTURA_CREDITO_FISCAL_FISICA, TipoComprobante::FACTURA_CONSUMO, TipoComprobante::FACTURA_CONSUMO_FISICA]
+            : [TipoComprobante::FACTURA_CONSUMO, TipoComprobante::FACTURA_CONSUMO_FISICA];
+
+        foreach ($preferidos as $tipo) {
+            if ($disponibles->contains($tipo)) {
+                return $tipo->value;
+            }
+        }
+
+        return null;
+    }
+
+    public function mount(int|string $record): void
+    {
+        parent::mount($record);
+
+        // Recién creada: se abre el modal para imprimirla (ver CreateCotizacion).
+        if (session()->pull('cotizacion_recien_creada') === $this->getRecord()->getKey()) {
+            $this->defaultAction = 'imprimirTrasCrear';
+        }
+    }
+
+    public function imprimirTrasCrearAction(): Action
+    {
+        return Action::make('imprimirTrasCrear')
+            ->modalHeading(fn () => "Cotización {$this->getRecord()->numero} creada")
+            ->modalDescription(fn () => 'Total RD$ '.number_format((float) $this->getRecord()->total, 2).'. ¿Quieres imprimirla o descargar el PDF?')
+            ->modalIcon(Heroicon::OutlinedPrinter)
+            ->modalIconColor('success')
+            ->modalWidth('md')
+            ->modalSubmitAction(false)
+            ->modalCancelActionLabel('Ahora no')
+            ->extraModalFooterActions(fn () => [
+                Action::make('abrirPdfCotizacion')
+                    ->label('Imprimir / PDF')
+                    ->icon(Heroicon::OutlinedPrinter)
+                    ->url(route('cotizaciones.pdf', $this->getRecord()), shouldOpenInNewTab: true)
+                    ->close(),
+            ]);
     }
 }

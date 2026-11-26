@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Enums\EstadoCotizacion;
+use App\Models\Cotizacion;
 use App\Enums\OrigenVenta;
 use App\Enums\TasaItbis;
 use App\Enums\TipoProducto;
@@ -292,5 +293,46 @@ class CotizacionTest extends TestCase
 
         $pagina->call('create')->assertHasNoFormErrors();
         $this->assertDatabaseHas('detalle_cotizaciones', ['producto_id' => $this->producto->id]);
+    }
+
+    /** Al crear se va a la cotización con el modal de imprimir abierto. */
+    public function test_al_crear_redirige_a_la_cotizacion_y_abre_el_modal_de_imprimir(): void
+    {
+        \Filament\Facades\Filament::setTenant($this->empresa);
+
+        \Livewire\Livewire::test(\App\Filament\Resources\CotizacionResource\Pages\CreateCotizacion::class)
+            ->fillForm(['buscar_producto' => $this->producto->id])
+            ->call('create')
+            ->assertHasNoFormErrors();
+
+        $cotizacion = Cotizacion::latest('id')->first();
+
+        \Livewire\Livewire::test(\App\Filament\Resources\CotizacionResource\Pages\ViewCotizacion::class, ['record' => $cotizacion->getKey()])
+            ->assertSet('defaultAction', 'imprimirTrasCrear');
+
+        // Solo la primera vez: al volver a entrar no se abre.
+        \Livewire\Livewire::test(\App\Filament\Resources\CotizacionResource\Pages\ViewCotizacion::class, ['record' => $cotizacion->getKey()])
+            ->assertSet('defaultAction', null);
+    }
+
+    /** Un fallo al facturar (aquí: sin stock) sale como aviso, no como error 500. */
+    public function test_facturar_con_error_avisa_sin_romper(): void
+    {
+        \Filament\Facades\Filament::setTenant($this->empresa);
+        \App\Models\SecuenciaNcf::create([
+            'empresa_id' => $this->empresa->id, 'tipo_comprobante' => \App\Enums\TipoComprobante::FACTURA_CONSUMO_FISICA,
+            'prefijo' => 'B02', 'secuencia_desde' => 1, 'secuencia_actual' => 1, 'secuencia_hasta' => 100,
+            'vencimiento' => now()->addYear(), 'activa' => true,
+        ]);
+        $this->producto->update(['stock' => 0]);
+        $cotizacion = $this->service->crear($this->datosCotizacion(), $this->admin->id, $this->empresa);
+        $cotizacion->update(['estado' => EstadoCotizacion::APROBADA]);
+
+        \Livewire\Livewire::test(\App\Filament\Resources\CotizacionResource\Pages\ViewCotizacion::class, ['record' => $cotizacion->getKey()])
+            ->callAction('facturar', data: ['tipo_comprobante' => 'B02', 'forma_pago' => 'efectivo', 'tipo_pago' => 1])
+            ->assertHasNoActionErrors()
+            ->assertNotified('No se pudo facturar');
+
+        $this->assertNull($cotizacion->fresh()->venta_id);
     }
 }

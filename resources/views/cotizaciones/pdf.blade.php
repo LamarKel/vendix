@@ -1,18 +1,5 @@
+@php extract(\App\Support\EstiloPdf::para($empresa)); @endphp
 @php
-    use Illuminate\Support\Facades\Storage;
-
-    $nombreEmpresa = $empresa->nombre_comercial ?: $empresa->razon_social;
-    $fechaFormateada = $cotizacion->fecha->translatedFormat('d \d\e F \d\e Y');
-
-    $logoBase64 = null;
-    if ($empresa->logo) {
-        $rutaLogo = Storage::disk('public')->path($empresa->logo);
-        if (is_file($rutaLogo)) {
-            $mime = mime_content_type($rutaLogo) ?: 'image/png';
-            $logoBase64 = 'data:' . $mime . ';base64,' . base64_encode(file_get_contents($rutaLogo));
-        }
-    }
-
     // Textos configurables en Configuración → Facturación → Textos en documentos impresos.
     $cfg = $empresa->config();
     $docCot = \App\Enums\DocumentoImpreso::COTIZACION;
@@ -20,253 +7,132 @@
     $incluye = $cfg->textoDocumento($docCot, 'incluye');
     $noIncluye = $cfg->textoDocumento($docCot, 'no_incluye');
     $pie = $cfg->textoDocumento($docCot);
-
-    $cp = $colorPrimario;
-    $cs = $colorSecundario;
-
-    // DomPDF doesn't support hex+alpha (e.g. #00C9D710), so compute a 10% tint over white.
-    $r = hexdec(substr($cp, 1, 2));
-    $g = hexdec(substr($cp, 3, 2));
-    $b = hexdec(substr($cp, 5, 2));
-    $lightAccent = sprintf('#%02X%02X%02X',
-        (int) round($r * 0.1 + 255 * 0.9),
-        (int) round($g * 0.1 + 255 * 0.9),
-        (int) round($b * 0.1 + 255 * 0.9),
-    );
+    $descuentoLineas = $cotizacion->detalles->sum(fn ($d) => (float) $d->descuento);
 @endphp
 <!DOCTYPE html>
 <html lang="es">
 <head>
     <meta charset="utf-8">
     <title>Cotización {{ $cotizacion->numero }}</title>
-    <style>
-        @page {
-            margin: 13mm 18mm 15mm 18mm;
-            size: letter;
-        }
-        body {
-            font-family: Helvetica, Arial, sans-serif;
-            font-size: 8.5px;
-            color: {{ $cs }};
-            margin: 0;
-            padding: 0;
-        }
-        table { width: 100%; border-collapse: collapse; }
-
-        .header-table td { vertical-align: top; }
-        .logo { max-width: 100px; max-height: 70px; }
-        .doc-title {
-            font-size: 21px;
-            font-weight: bold;
-            color: {{ $cs }};
-            margin: 0;
-        }
-        .doc-meta {
-            font-size: 8.5px;
-            color: #5B6670;
-            margin: 1px 0;
-        }
-        .header-line {
-            border: none;
-            border-top: 2px solid {{ $cp }};
-            margin: 8px 0 10px 0;
-        }
-
-        .client-block {
-            background-color: #F4F7F8;
-            border: 0.5px solid #D9E2E7;
-            padding: 8px;
-            margin-bottom: 7px;
-        }
-        .client-block td {
-            font-size: 8.5px;
-            vertical-align: top;
-        }
-        .client-label { font-weight: bold; }
-
-        .section-title {
-            font-size: 10px;
-            font-weight: bold;
-            color: {{ $cs }};
-            margin: 7px 0 4px 0;
-        }
-        .detail-table th {
-            background-color: {{ $cs }};
-            color: #ffffff;
-            font-weight: bold;
-            font-size: 8.6px;
-            padding: 7px;
-            text-align: left;
-        }
-        .detail-table th.text-right { text-align: right; }
-        .detail-table td {
-            padding: 7px;
-            border: 0.35px solid #D9E2E7;
-            font-size: 8.6px;
-            vertical-align: top;
-        }
-        .row-alt { background-color: #F8FAFB; }
-        .line-num { color: #5B6670; font-size: 7.7px; }
-        .prod-name { font-weight: bold; color: {{ $cs }}; }
-        .prod-desc { color: #5B6670; }
-        .text-right { text-align: right; }
-
-        .total-bar { background-color: {{ $cs }}; width: 100%; margin-top: 0; }
-        .total-bar td { padding: 10px; color: #ffffff; vertical-align: middle; }
-        .total-label { font-size: 11px; font-weight: bold; }
-        .total-amount {
-            font-size: 17px;
-            font-weight: bold;
-            text-align: right;
-            border-left: 1.5px solid {{ $cp }};
-            padding-left: 12px;
-        }
-
-        .cond-table td {
-            border: 0.5px solid #D9E2E7;
-            padding: 7px 8px;
-            font-size: 8.5px;
-            vertical-align: top;
-        }
-        .cond-label {
-            background-color: {{ $lightAccent }};
-            font-weight: bold;
-            width: 28mm;
-        }
-
-        .observations {
-            font-size: 8.5px;
-            color: #5B6670;
-            margin-top: 8px;
-        }
-
-        .footer-line {
-            border: none;
-            border-top: 1px solid {{ $cp }};
-            margin: 12px 0 6px 0;
-        }
-        .footer-table td {
-            font-size: 8.5px;
-            color: #5B6670;
-            vertical-align: top;
-        }
-    </style>
+    @include('pdf._estilos')
 </head>
 <body>
+    <div class="pie">
+        <table><tr>
+            <td>{{ $nombreEmpresaPdf }} · Cotización {{ $cotizacion->numero }}</td>
+            <td style="text-align: right;">Generado con Vendix</td>
+        </tr></table>
+    </div>
 
-    {{-- 1. HEADER --}}
-    <table class="header-table">
+    @include('pdf._encabezado', [
+        'titulo' => 'COTIZACIÓN',
+        'numero' => $cotizacion->numero,
+        'datos' => [
+            'Fecha' => $cotizacion->fecha->format('d/m/Y'),
+            'Válida hasta' => $cotizacion->fecha_vencimiento?->format('d/m/Y'),
+            'Condiciones' => $cotizacion->condiciones_pago,
+            'Preparada por' => $cotizacion->user?->name,
+        ],
+    ])
+
+    <table class="bloque">
         <tr>
-            <td style="width: 50%;">
-                @if ($logoBase64)
-                    <img src="{{ $logoBase64 }}" class="logo" alt="Logo">
-                @endif
+            <td style="width: 58%; padding-right: 12px;">
+                <p class="etiqueta">Preparada para</p>
+                <div class="caja">
+                    @if ($cotizacion->cliente)
+                        <p class="fuerte">{{ $cotizacion->cliente->nombre }}</p>
+                        @if ($cotizacion->cliente->documento)<p class="emp-dato">RNC / Cédula: {{ $cotizacion->cliente->documento }}</p>@endif
+                        @if ($cotizacion->cliente->direccion)<p class="emp-dato">{{ $cotizacion->cliente->direccion }}</p>@endif
+                        @if ($cotizacion->cliente->telefono || $cotizacion->cliente->email)
+                            <p class="emp-dato">{{ collect([$cotizacion->cliente->telefono ? 'Tel: '.$cotizacion->cliente->telefono : null, $cotizacion->cliente->email])->filter()->implode(' · ') }}</p>
+                        @endif
+                    @else
+                        <p class="fuerte">Cliente general</p>
+                    @endif
+                </div>
             </td>
-            <td style="width: 50%; text-align: right;">
-                <p class="doc-title">COTIZACIÓN</p>
-                <p class="doc-meta">Fecha: {{ $fechaFormateada }}</p>
-                <p class="doc-meta">No. de cotización: {{ $cotizacion->numero }}</p>
+            <td style="width: 42%;">
+                <p class="etiqueta">Moneda</p>
+                <div class="caja"><p class="fuerte">Pesos dominicanos (RD$)</p></div>
             </td>
         </tr>
     </table>
-    <hr class="header-line">
 
-    {{-- 2. CLIENT BLOCK --}}
-    @if ($cotizacion->cliente)
-        <div class="client-block">
-            <table>
-                <tr>
-                    <td style="width: 60%;">
-                        <span class="client-label">Preparado para:</span> {{ $cotizacion->cliente->nombre }}
-                    </td>
-                    <td style="width: 40%; text-align: right;">
-                        <span class="client-label">Moneda:</span> Pesos dominicanos (RD$)
-                    </td>
-                </tr>
-            </table>
-        </div>
-    @endif
-
-    {{-- 3. DETAIL TABLE --}}
-    <p class="section-title">Detalle de la cotización</p>
-    <table class="detail-table">
+    <table class="lineas">
         <thead>
             <tr>
-                <th style="width: 12mm;">#</th>
+                <th style="width: 6%;">#</th>
                 <th>Descripción</th>
-                <th class="text-right" style="width: 42mm;">Precio</th>
+                <th class="num" style="width: 10%;">Cant.</th>
+                <th class="num" style="width: 14%;">Precio</th>
+                @if ($descuentoLineas > 0)<th class="num" style="width: 12%;">Desc.</th>@endif
+                <th class="num" style="width: 16%;">Importe</th>
             </tr>
         </thead>
         <tbody>
             @foreach ($cotizacion->detalles as $detalle)
-                <tr class="{{ $loop->odd ? '' : 'row-alt' }}">
-                    <td class="line-num">{{ $loop->iteration }}</td>
+                <tr class="{{ $loop->even ? 'alt' : '' }}">
+                    <td class="codigo">{{ $loop->iteration }}</td>
                     <td>
-                        <span class="prod-name">{{ $detalle->producto->nombre }}</span>
-                        @if ($detalle->producto->descripcion)
-                            <br><span class="prod-desc">{{ $detalle->producto->descripcion }}</span>
-                        @endif
+                        <b style="color: {{ $cs }};">{{ $detalle->producto?->nombre }}</b>
+                        @if ($detalle->producto?->descripcion)<br><span style="color: #6B7280;">{{ $detalle->producto->descripcion }}</span>@endif
+                        @if ($detalle->producto?->codigo)<br><span class="codigo">{{ $detalle->producto->codigo }}</span>@endif
                     </td>
-                    <td class="text-right" style="font-weight: bold;">
-                        RD${{ number_format((float) $detalle->subtotal, 2, '.', ',') }}
-                    </td>
+                    <td class="num">{{ rtrim(rtrim(number_format((float) $detalle->cantidad, 3, '.', ''), '0'), '.') }}</td>
+                    <td class="num">{{ number_format((float) $detalle->precio_unitario, 2) }}</td>
+                    @if ($descuentoLineas > 0)<td class="num">{{ (float) $detalle->descuento > 0 ? '-'.number_format((float) $detalle->descuento, 2) : '' }}</td>@endif
+                    <td class="num"><b>{{ number_format((float) $detalle->subtotal, 2) }}</b></td>
                 </tr>
             @endforeach
         </tbody>
     </table>
 
-    {{-- 4. TOTAL BAR --}}
-    <table class="total-bar">
+    <table class="resumen">
         <tr>
-            <td class="total-label">TOTAL DE LA COTIZACIÓN</td>
-            <td class="total-amount" style="width: 40%;">RD${{ number_format((float) $cotizacion->total, 2, '.', ',') }}</td>
+            <td style="width: 58%; padding-right: 12px;">
+                @if ($observaciones)
+                    <p class="etiqueta">Observaciones</p>
+                    <div class="caja" style="font-size: 8.5px; color: #4B5563;">{!! nl2br(e($observaciones)) !!}</div>
+                @endif
+            </td>
+            <td style="width: 42%;">
+                <table class="totales">
+                    <tr><td>Subtotal</td><td class="num">{{ number_format((float) $cotizacion->subtotal, 2) }}</td></tr>
+                    @if ((float) $cotizacion->descuento > 0)
+                        <tr><td>Descuento</td><td class="num">-{{ number_format((float) $cotizacion->descuento, 2) }}</td></tr>
+                    @endif
+                    <tr><td>ITBIS</td><td class="num">{{ number_format((float) $cotizacion->itbis, 2) }}</td></tr>
+                    <tr class="gran"><td>TOTAL RD$</td><td class="num">{{ number_format((float) $cotizacion->total, 2) }}</td></tr>
+                </table>
+            </td>
         </tr>
     </table>
 
-    {{-- 5. CONDITIONS --}}
     @if ($incluye || $noIncluye)
-        <p class="section-title">Alcance y condiciones del servicio</p>
-        <table class="cond-table">
-            @if ($incluye)
-                <tr>
-                    <td class="cond-label">Incluye</td>
-                    <td>{!! nl2br(e($incluye)) !!}</td>
-                </tr>
-            @endif
-            @if ($noIncluye)
-                <tr>
-                    <td class="cond-label">No incluye</td>
-                    <td>{!! nl2br(e($noIncluye)) !!}</td>
-                </tr>
-            @endif
+        <table class="bloque">
+            <tr>
+                @if ($incluye)
+                    <td style="padding-right: 6px;">
+                        <p class="etiqueta">Incluye</p>
+                        <div class="caja" style="font-size: 8.5px;">{!! nl2br(e($incluye)) !!}</div>
+                    </td>
+                @endif
+                @if ($noIncluye)
+                    <td style="padding-left: 6px;">
+                        <p class="etiqueta">No incluye</p>
+                        <div class="caja" style="font-size: 8.5px;">{!! nl2br(e($noIncluye)) !!}</div>
+                    </td>
+                @endif
+            </tr>
         </table>
     @endif
 
-    {{-- 6. OBSERVATIONS --}}
-    @if ($observaciones)
-        <p class="observations">
-            <strong>Observaciones:</strong> {!! nl2br(e($observaciones)) !!}
-        </p>
+    <p class="nota" style="text-align: center; margin-top: 16px;">
+        Precios en pesos dominicanos{{ $cotizacion->fecha_vencimiento ? ', válidos hasta el '.$cotizacion->fecha_vencimiento->format('d/m/Y') : '' }}. Sujeto a disponibilidad de inventario.
+    </p>
+    @if ($pie)
+        <p class="nota" style="text-align: center; margin-top: 4px;">{!! nl2br(e($pie)) !!}</p>
     @endif
-
-    {{-- 7. FOOTER --}}
-    <hr class="footer-line">
-    <table class="footer-table">
-        <tr>
-            <td style="width: 60%;">
-                <strong>{{ $nombreEmpresa }}</strong>
-                @if ($empresa->telefono)
-                    · Tel: {{ $empresa->telefono }}
-                @endif
-                @if ($empresa->email)
-                    · {{ $empresa->email }}
-                @endif
-            </td>
-            <td style="width: 40%; text-align: right; color: {{ $cs }};">
-                {!! nl2br(e($pie ?? '')) !!}
-            </td>
-        </tr>
-    </table>
-
 </body>
 </html>

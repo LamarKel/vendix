@@ -21,7 +21,7 @@ class VentaComprobanteController extends Controller
     {
         abort_unless(request()->user()->perteneceAEmpresa($venta->empresa_id), 403);
 
-        $venta->load('detalles.producto', 'cliente');
+        $venta->load('detalles.producto', 'cliente', 'user', 'empresa.configuracion');
 
         $pdf = Pdf::loadView('ventas.comprobante', [
             'venta' => $venta,

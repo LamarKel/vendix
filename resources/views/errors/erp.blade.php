@@ -44,7 +44,7 @@
         a {
             display: inline-block; text-decoration: none;
             padding: 12px 28px; border-radius: 8px; font-size: 15px; font-weight: 500;
-            background: #4338ca; color: #fff;
+            background: #0C8A63; color: #fff;
         }
         a.secundario { background: #fff; color: #1f2937; border: 1px solid #9ca3af; }
         a:hover { filter: brightness(.92); }

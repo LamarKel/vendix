@@ -28,9 +28,11 @@ use RuntimeException;
 class PedidoVentaService
 {
     /**
-     * @param  array<int, array{producto_id: int, presentacion_id?: int|null, cantidad: float|int|string}>  $lineas
+     * @param  array<int, array{producto_id: int, presentacion_id?: int|null, cantidad: float|int|string, precio?: string|null}>  $lineas
+     *   'precio' solo lo usa enviarACaja() de una cotización (precio ya negociado); desde la
+     *   pantalla de pedidos nunca se pasa y vale el precio de la base.
      */
-    public function crear(Empresa $empresa, User $vendedor, string $nombreCliente, array $lineas, ?int $clienteId = null, ?string $notas = null): PedidoVenta
+    public function crear(Empresa $empresa, User $vendedor, string $nombreCliente, array $lineas, ?int $clienteId = null, ?string $notas = null, ?int $cotizacionId = null): PedidoVenta
     {
         $nombreCliente = trim(preg_replace('/\s+/', ' ', $nombreCliente) ?? '');
 
@@ -96,7 +98,9 @@ class PedidoVentaService
                 }
             }
 
-            $precio = (string) ($presentacion?->precio ?? $producto->precio ?? 0);
+            $precio = isset($linea['precio']) && $cotizacionId !== null
+                ? (string) $linea['precio']
+                : (string) ($presentacion?->precio ?? $producto->precio ?? 0);
 
             $detalles[] = [
                 'producto_id' => $producto->id,
@@ -111,7 +115,7 @@ class PedidoVentaService
             $total = bcadd($total, bcmul($precio, $cantidad, 4), 2);
         }
 
-        return DB::transaction(function () use ($empresa, $vendedor, $nombreCliente, $clienteId, $notas, $detalles, $total) {
+        return DB::transaction(function () use ($empresa, $vendedor, $nombreCliente, $clienteId, $notas, $detalles, $total, $cotizacionId) {
             // Serializa la numeración por empresa: dos vendedores enviando a la vez no sacan el mismo
             // número (el índice único lo garantiza igual, esto evita que uno falle por la carrera).
             Empresa::whereKey($empresa->id)->lockForUpdate()->first();
@@ -123,6 +127,7 @@ class PedidoVentaService
                 'numero' => $numero,
                 'nombre_cliente' => $nombreCliente,
                 'cliente_id' => $clienteId,
+                'cotizacion_id' => $cotizacionId,
                 'vendedor_id' => $vendedor->id,
                 'estado' => EstadoPedidoVenta::PENDIENTE,
                 'notas' => filled($notas) ? mb_substr(trim($notas), 0, 500) : null,
@@ -205,6 +210,13 @@ class PedidoVentaService
                 'cobrado_por' => $cajeroId,
                 'cobrado_en' => now(),
             ]);
+
+            // Pedido que vino de una cotización: queda facturada y enlazada a la venta.
+            if ($pedido->cotizacion_id !== null) {
+                \App\Models\Cotizacion::where('empresa_id', $empresa->id)
+                    ->whereKey($pedido->cotizacion_id)
+                    ->update(['estado' => \App\Enums\EstadoCotizacion::FACTURADA->value, 'venta_id' => $venta->id]);
+            }
 
             return $venta;
         });

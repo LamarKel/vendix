@@ -115,9 +115,11 @@ class PuntoDeVenta extends Page
     public array $totales = [];
 
     /**
-     * Pedido a caja cargado en el carrito. Lo puede reescribir el navegador: al cobrar,
+     * Pedido a caja cargado en el carrito. #[Locked]: solo lo fija cargarPedido(), porque si el
+     * pedido viene de una cotización define los precios (ver preciosDeCotizacion()). Al cobrar,
      * PedidoVentaService vuelve a comprobar que sea de esta empresa y siga pendiente.
      */
+    #[\Livewire\Attributes\Locked]
     public ?int $pedidoId = null;
 
     /** Texto informativo del pedido cargado ("P-0015 — Juan Pérez"). */
@@ -1371,6 +1373,7 @@ class PuntoDeVenta extends Page
 
         $puedeDescontar = $this->puedeAplicarDescuento();
         $preciosLista = $this->preciosDeListaDelCliente(array_keys($productos->all()));
+        $preciosCotizacion = $this->preciosDeCotizacion();
 
         foreach ($this->carrito as $indice => $linea) {
             if (! $puedeDescontar) {
@@ -1398,13 +1401,49 @@ class PuntoDeVenta extends Page
                 && ($presentacion === null || $presentacion->es_base)
                 && isset($preciosLista[$producto->id]);
 
+            $claveCotizacion = $producto->id.'|'.($presentacion?->id ?? '');
+
             $this->carrito[$indice]['precio_unitario'] = match (true) {
+                isset($preciosCotizacion[$claveCotizacion]) => $preciosCotizacion[$claveCotizacion],
                 $aplicaLista => (string) $preciosLista[$producto->id],
                 $esPesado => (string) ($producto->precio_por_peso ?? 0),
                 default => (string) ($presentacion?->precio ?? $producto->precio),
             };
             $this->carrito[$indice]['factor'] = $esPesado ? '1' : (string) ($presentacion?->factor ?? 1);
         }
+    }
+
+    /**
+     * Precios negociados del pedido cargado cuando viene de una cotización APROBADA y vigente
+     * (hasta el final de su día de vencimiento), por "producto_id|presentacion_id". Vacío en
+     * cualquier otro caso: entonces vale el precio normal.
+     *
+     * @return array<string, string>
+     */
+    protected function preciosDeCotizacion(): array
+    {
+        if ($this->pedidoId === null) {
+            return [];
+        }
+
+        $pedido = \App\Models\PedidoVenta::query()
+            ->where('empresa_id', $this->empresaId())
+            ->whereNotNull('cotizacion_id')
+            ->with(['detalles', 'cotizacion'])
+            ->find($this->pedidoId);
+
+        $cotizacion = $pedido?->cotizacion;
+
+        if ($cotizacion === null
+            || $cotizacion->empresa_id !== $this->empresaId()
+            || $cotizacion->estado !== \App\Enums\EstadoCotizacion::APROBADA
+            || $cotizacion->fecha_vencimiento?->endOfDay()->isPast()) {
+            return [];
+        }
+
+        return $pedido->detalles
+            ->mapWithKeys(fn ($d) => [$d->producto_id.'|'.($d->presentacion_id ?? '') => (string) $d->precio_estimado])
+            ->all();
     }
 
     /**

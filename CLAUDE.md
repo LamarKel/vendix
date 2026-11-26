@@ -134,6 +134,15 @@ base, lista activa y de la misma empresa) → precio de la presentación → pre
 - Sin sesión, las rutas con `auth` redirigen al login del panel (`redirectGuestsTo` en
   `bootstrap/app.php`); la app no tiene ruta `login`.
 
+### Cotización → caja
+
+Una cotización APROBADA se manda a caja (`CotizacionService::enviarACaja()`) como pedido en espera
+(`pedidos_venta.cotizacion_id`). La caja la cobra en su turno al precio cotizado (descuento de línea
+repartido en el precio) mientras esté vigente; vencida, al precio actual
+(`PuntoDeVenta::preciosDeCotizacion()`). `pedidoId` es `#[Locked]` por eso. Al cobrar,
+`PedidoVentaService::cobrar()` marca la cotización FACTURADA con su `venta_id`. "Facturar directo"
+(sin caja, sin arqueo) solo para `sucursales.administrar`.
+
 ### Origen de cada venta
 
 - `ventas.origen` (`App\Enums\OrigenVenta`): pantalla o flujo que cobró (POS, POS táctil,

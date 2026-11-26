@@ -161,6 +161,60 @@ class CotizacionService
         });
     }
 
+    /**
+     * Manda la cotización aprobada a caja como pedido en espera, a nombre del cliente. La caja la
+     * cobra al precio cotizado (descuento de línea ya incluido en el precio unitario) mientras esté
+     * vigente; vencida, se cobra al precio actual (ver PuntoDeVenta::sanearCarrito()).
+     */
+    public function enviarACaja(Cotizacion $cotizacion, Empresa $empresa, \App\Models\User $usuario): \App\Models\PedidoVenta
+    {
+        if ((int) $cotizacion->empresa_id !== (int) $empresa->id) {
+            throw new RuntimeException('La cotización no pertenece a esta empresa.');
+        }
+
+        if (! $cotizacion->puedeConvertirse()) {
+            throw new RuntimeException('Solo se puede enviar a caja una cotización aprobada y sin facturar.');
+        }
+
+        if ($cotizacion->fecha_vencimiento?->endOfDay()->isPast()) {
+            throw new RuntimeException('La cotización está vencida: duplícala para actualizar los precios.');
+        }
+
+        $yaEnviada = \App\Models\PedidoVenta::where('empresa_id', $empresa->id)
+            ->where('cotizacion_id', $cotizacion->id)
+            ->where('estado', \App\Enums\EstadoPedidoVenta::PENDIENTE->value)
+            ->first();
+
+        if ($yaEnviada !== null) {
+            throw new RuntimeException("Ya está en caja como pedido {$yaEnviada->etiquetaNumero()}.");
+        }
+
+        $cotizacion->load('detalles', 'cliente');
+
+        $lineas = $cotizacion->detalles->map(function (DetalleCotizacion $d) {
+            $cantidad = (string) $d->cantidad;
+            $precio = (string) $d->precio_unitario;
+
+            // El descuento de la línea se reparte en el precio unitario: la caja no tiene
+            // descuento libre por línea.
+            if (bccomp((string) $d->descuento, '0', 2) > 0 && bccomp($cantidad, '0', 4) > 0) {
+                $precio = bcsub($precio, bcdiv((string) $d->descuento, $cantidad, 4), 2);
+            }
+
+            return ['producto_id' => $d->producto_id, 'cantidad' => $cantidad, 'precio' => $precio];
+        })->all();
+
+        return app(PedidoVentaService::class)->crear(
+            $empresa,
+            $usuario,
+            $cotizacion->cliente?->nombre ?? "Cotización {$cotizacion->numero}",
+            $lineas,
+            $cotizacion->cliente_id,
+            "Cotización {$cotizacion->numero}",
+            $cotizacion->id,
+        );
+    }
+
     public function duplicar(Cotizacion $cotizacion, Empresa $empresa): Cotizacion
     {
         if ((int) $cotizacion->empresa_id !== (int) $empresa->id) {

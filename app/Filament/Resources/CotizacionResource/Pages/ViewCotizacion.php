@@ -71,11 +71,39 @@ class ViewCotizacion extends ViewRecord
                     Notification::make()->title('Cotización rechazada.')->warning()->send();
                 }),
 
-            Action::make('facturar')
-                ->label('Facturar')
-                ->icon(Heroicon::OutlinedShoppingCart)
+            // Flujo normal: la cotización aprobada va a caja como pedido en espera y la cajera la
+            // cobra en su turno (queda en su arqueo), al precio cotizado.
+            Action::make('enviarACaja')
+                ->label(fn (Cotizacion $record) => $this->pedidoEnCaja($record) ? 'En caja: '.$this->pedidoEnCaja($record)->etiquetaNumero() : 'Enviar a caja')
+                ->icon(Heroicon::OutlinedPaperAirplane)
                 ->color('success')
+                ->disabled(fn (Cotizacion $record) => $this->pedidoEnCaja($record) !== null)
                 ->visible(fn (Cotizacion $record) => $record->puedeConvertirse() && $user->can('cotizaciones.facturar'))
+                ->requiresConfirmation()
+                ->modalHeading('¿Enviar a caja?')
+                ->modalDescription(fn (Cotizacion $record) => 'Queda como pedido en espera a nombre de '.($record->cliente?->nombre ?? 'cliente general')
+                    .'. La caja lo cobra al precio cotizado (RD$ '.number_format((float) $record->total, 2).') mientras esté vigente.')
+                ->modalSubmitActionLabel('Enviar a caja')
+                ->action(function (Cotizacion $record) {
+                    try {
+                        $pedido = app(CotizacionService::class)->enviarACaja($record, Filament::getTenant(), auth()->user());
+                        Notification::make()
+                            ->title("Enviada a caja como pedido {$pedido->etiquetaNumero()}")
+                            ->body('La cajera la encuentra en PEDIDOS EN ESPERA por el nombre del cliente.')
+                            ->success()
+                            ->send();
+                    } catch (Throwable $e) {
+                        Notification::make()->title('No se pudo enviar a caja')->body(MensajeError::para($e))->danger()->send();
+                    }
+                }),
+
+            // Facturar directo (sin pasar por caja): solo para quien administra sucursales, p. ej.
+            // una factura a crédito hecha desde la oficina. No queda en ningún arqueo de caja.
+            Action::make('facturar')
+                ->label('Facturar directo')
+                ->icon(Heroicon::OutlinedShoppingCart)
+                ->color('gray')
+                ->visible(fn (Cotizacion $record) => $record->puedeConvertirse() && $user->can('cotizaciones.facturar') && $user->can('sucursales.administrar') && $this->pedidoEnCaja($record) === null)
                 ->form([
                     Select::make('tipo_comprobante')
                         ->label('Tipo de Comprobante')
@@ -168,6 +196,15 @@ class ViewCotizacion extends ViewRecord
                 ->visible(fn () => $user->can('cotizaciones.exportar'))
                 ->url(fn (Cotizacion $record) => route('cotizaciones.pdf', $record), shouldOpenInNewTab: true),
         ];
+    }
+
+    /** Pedido pendiente en caja que salió de esta cotización (si lo hay). */
+    private function pedidoEnCaja(Cotizacion $record): ?\App\Models\PedidoVenta
+    {
+        return once(fn () => \App\Models\PedidoVenta::where('empresa_id', $record->empresa_id)
+            ->where('cotizacion_id', $record->id)
+            ->where('estado', \App\Enums\EstadoPedidoVenta::PENDIENTE->value)
+            ->first());
     }
 
     /** B01/31 si el cliente tiene documento; si no, consumo (B02/32), según lo disponible. */

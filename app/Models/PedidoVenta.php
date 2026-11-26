@@ -15,7 +15,7 @@ class PedidoVenta extends Model
     protected $table = 'pedidos_venta';
 
     protected $fillable = [
-        'empresa_id', 'numero', 'nombre_cliente', 'cliente_id', 'vendedor_id', 'estado', 'notas',
+        'empresa_id', 'numero', 'nombre_cliente', 'cliente_id', 'cotizacion_id', 'vendedor_id', 'estado', 'notas',
         'total_estimado', 'venta_id', 'cobrado_por', 'cobrado_en', 'cancelado_por', 'cancelado_en',
         'motivo_cancelacion',
     ];
@@ -76,5 +76,10 @@ class PedidoVenta extends Model
     public function etiquetaNumero(): string
     {
         return 'P-'.str_pad((string) $this->numero, 4, '0', STR_PAD_LEFT);
+    }
+
+    public function cotizacion(): \Illuminate\Database\Eloquent\Relations\BelongsTo
+    {
+        return $this->belongsTo(Cotizacion::class);
     }
 }

@@ -298,4 +298,83 @@ class PedidoVentaTest extends TestCase
         $this->assertSame(EstadoPedidoVenta::COBRADO, $pedido->fresh()->estado);
         $this->assertSame($caja->id, $pedido->fresh()->venta->caja_id);
     }
+
+    private function cotizacionAprobada(string $precio = '450', string $descuento = '100', int $dias = 15): \App\Models\Cotizacion
+    {
+        $cotizacion = app(\App\Services\CotizacionService::class)->crear([
+            'cliente_id' => null, 'fecha' => now()->toDateString(), 'dias_vigencia' => $dias,
+            'lineas' => [['producto_id' => $this->producto->id, 'cantidad' => 2, 'precio_unitario' => $precio, 'descuento' => $descuento]],
+        ], $this->admin->id, $this->empresaDefault);
+        $cotizacion->update(['estado' => \App\Enums\EstadoCotizacion::APROBADA]);
+
+        return $cotizacion;
+    }
+
+    /** Cotización aprobada → caja: se cobra al precio cotizado y la cotización queda facturada. */
+    public function test_la_cotizacion_enviada_a_caja_se_cobra_al_precio_cotizado(): void
+    {
+        $cotizacion = $this->cotizacionAprobada();   // 2 × 450 − 100 = 800 (vs. 1,000 a precio normal)
+        $pedido = app(\App\Services\CotizacionService::class)->enviarACaja($cotizacion, $this->empresaDefault, $this->admin);
+        $this->assertSame($cotizacion->id, $pedido->cotizacion_id);
+        $this->assertEquals(400, (float) $pedido->detalles->first()->precio_estimado);
+
+        app(ArqueoCajaService::class)->abrir('0', $this->admin->id, $this->empresaDefault);
+
+        Livewire::actingAs($this->admin)
+            ->test(\App\Filament\Pages\Caja::class)
+            ->assertSee('Pedidos en espera')
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO_FISICA->value)
+            ->call('cargarPedido', $pedido->id)
+            ->set('carrito.0.precio_unitario', '1')     // manipulado: vale el cotizado, no este
+            ->set('formaPago', 'efectivo')
+            ->set('montoEfectivo', '2000')
+            ->call('cobrar')
+            ->assertSet('pedidoId', null);
+
+        $cotizacion->refresh();
+        $this->assertSame(\App\Enums\EstadoCotizacion::FACTURADA, $cotizacion->estado);
+        $this->assertNotNull($cotizacion->venta_id);
+        $this->assertEquals(800, (float) $cotizacion->venta->subtotal);
+        $this->assertNotNull($cotizacion->venta->arqueo_caja_id);  // quedó en el turno de la caja
+    }
+
+    public function test_no_se_envia_dos_veces_ni_vencida(): void
+    {
+        $cotizacion = $this->cotizacionAprobada();
+        $servicio = app(\App\Services\CotizacionService::class);
+        $servicio->enviarACaja($cotizacion, $this->empresaDefault, $this->admin);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Ya está en caja');
+        $servicio->enviarACaja($cotizacion->fresh(), $this->empresaDefault, $this->admin);
+    }
+
+    /** Si vence mientras espera en caja, se cobra al precio actual. */
+    public function test_cotizacion_vencida_en_caja_se_cobra_al_precio_actual(): void
+    {
+        $cotizacion = $this->cotizacionAprobada();
+        $pedido = app(\App\Services\CotizacionService::class)->enviarACaja($cotizacion, $this->empresaDefault, $this->admin);
+        $cotizacion->update(['fecha_vencimiento' => now()->subDay()]);
+        app(ArqueoCajaService::class)->abrir('0', $this->admin->id, $this->empresaDefault);
+
+        Livewire::actingAs($this->admin)
+            ->test(PuntoDeVenta::class)
+            ->set('tipoComprobante', TipoComprobante::FACTURA_CONSUMO_FISICA->value)
+            ->call('cargarPedido', $pedido->id)
+            ->set('formaPago', 'efectivo')
+            ->set('montoEfectivo', '2000')
+            ->call('cobrar');
+
+        $this->assertEquals(1000, (float) $pedido->fresh()->venta->subtotal);
+    }
+
+    /** pedidoId está bloqueado: el navegador no puede apuntar a otro pedido para tomar sus precios. */
+    public function test_el_navegador_no_puede_cambiar_el_pedido_cargado(): void
+    {
+        app(ArqueoCajaService::class)->abrir('0', $this->admin->id, $this->empresaDefault);
+
+        $this->expectException(\Livewire\Features\SupportLockedProperties\CannotUpdateLockedPropertyException::class);
+
+        Livewire::actingAs($this->admin)->test(PuntoDeVenta::class)->set('pedidoId', 999);
+    }
 }

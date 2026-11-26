@@ -24,6 +24,55 @@
     @else
       <div class="pos-grid">
       <div class="pos-main">
+        {{-- Pedidos en espera: los que manda el vendedor de piso o una cotización aprobada --}}
+        @if ($this->puedeCobrarPedidos())
+          <div class="card">
+            @if ($pedidoId)
+              <div class="flex items-center justify-between flex-wrap gap-2">
+                <div>
+                  <span class="badge badge-success">Cobrando pedido</span>
+                  <strong>{{ $pedidoEtiqueta }}</strong>
+                </div>
+                <button type="button" class="btn btn-secondary" wire:click="soltarPedido">Soltar pedido</button>
+              </div>
+            @else
+              @php $pedidos = $this->pedidosPendientes(); @endphp
+              <div class="flex items-center justify-between gap-2 flex-wrap">
+                <h3 class="card-title" style="margin:0">
+                  Pedidos en espera
+                  @if ($pedidos->isNotEmpty())<span class="badge badge-success">{{ $pedidos->count() }}</span>@endif
+                </h3>
+                <input type="text" class="form-input" style="max-width:340px"
+                  placeholder="Buscar por nombre del cliente o número…"
+                  wire:model.live.debounce.300ms="busquedaPedido" />
+              </div>
+              @if ($pedidos->isNotEmpty())
+                <ul class="pos-resultados" wire:poll.15s style="margin-top:.5rem">
+                  @foreach ($pedidos as $pedido)
+                    <li wire:key="pedido-{{ $pedido->id }}">
+                      <button type="button" wire:click="cargarPedido({{ $pedido->id }})">
+                        <span>
+                          <strong>{{ $pedido->nombre_cliente }}</strong>
+                          <span class="pos-muted">{{ $pedido->etiquetaNumero() }}</span>
+                          @if ($pedido->cotizacion_id)<span class="badge badge-success">Cotización</span>@endif
+                        </span>
+                        <span class="pos-muted">
+                          {{ $pedido->detalles_count }} art. · RD$ {{ number_format((float) $pedido->total_estimado, 2) }}
+                          · {{ $pedido->vendedor?->name }} · {{ $pedido->created_at->diffForHumans() }}
+                        </span>
+                      </button>
+                    </li>
+                  @endforeach
+                </ul>
+              @elseif ($busquedaPedido !== '')
+                <p class="pos-muted mt-2">No hay pedidos pendientes con ese nombre.</p>
+              @else
+                <p class="pos-muted mt-2">No hay pedidos en espera.</p>
+              @endif
+            @endif
+          </div>
+        @endif
+
         {{-- Fila superior compacta: buscar cliente + buscar producto, solo sobre el carrito --}}
         <div class="pos-top-row">
           <div class="card pos-buscador-compacto">

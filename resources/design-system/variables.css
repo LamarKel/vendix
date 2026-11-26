@@ -20,44 +20,44 @@
     --primary-900:#0B4737;
     --primary-950:#04281F;
 
-    --secondary:#49BEFF;
-    --secondary-50:#F3F9FC;
-    --secondary-100:#E3F0F7;
-    --secondary-200:#C1E3F6;
-    --secondary-300:#8ED1F6;
-    --secondary-400:#49BEFF;
-    --secondary-500:#17ACFF;
-    --secondary-600:#0094E6;
-    --secondary-700:#0076B8;
-    --secondary-800:#065A89;
-    --secondary-900:#083F5E;
-    --secondary-950:#052639;
+    --secondary:#0EA5E9;
+    --secondary-50:#F0F9FF;
+    --secondary-100:#E0F2FE;
+    --secondary-200:#BAE6FD;
+    --secondary-300:#7DD3FC;
+    --secondary-400:#38BDF8;
+    --secondary-500:#0EA5E9;
+    --secondary-600:#0284C7;
+    --secondary-700:#0369A1;
+    --secondary-800:#075985;
+    --secondary-900:#0C4A6E;
+    --secondary-950:#082F49;
 
-    --tertiary:#13DEB9; /* también --success: color de confirmación/éxito */
-    --tertiary-50:#F4FBFA;
-    --tertiary-100:#E5F5F2;
-    --tertiary-200:#C5F2EA;
-    --tertiary-300:#96EEDE;
-    --tertiary-400:#56F1D4;
-    --tertiary-500:#29EDC9;
-    --tertiary-600:#13DEB9;
-    --tertiary-700:#0EA98D;
-    --tertiary-800:#107F6B;
-    --tertiary-900:#0E584A;
-    --tertiary-950:#09352D;
+    --tertiary:#16A34A; /* también --success: color de confirmación/éxito */
+    --tertiary-50:#F0FDF4;
+    --tertiary-100:#DCFCE7;
+    --tertiary-200:#BBF7D0;
+    --tertiary-300:#86EFAC;
+    --tertiary-400:#4ADE80;
+    --tertiary-500:#22C55E;
+    --tertiary-600:#16A34A;
+    --tertiary-700:#15803D;
+    --tertiary-800:#166534;
+    --tertiary-900:#14532D;
+    --tertiary-950:#052E16;
 
-    --neutral:#7C808D; /* gris de marca Stitch: sustituye al gris genérico de Filament */
-    --neutral-50:#F7F7F8;
-    --neutral-100:#ECEDEE;
-    --neutral-200:#D9DADD;
-    --neutral-300:#BEC0C5;
-    --neutral-400:#9DA0AA;
-    --neutral-500:#7C808D;
-    --neutral-600:#6B6F7B;
-    --neutral-700:#555862;
-    --neutral-800:#43454C;
-    --neutral-900:#303136;
-    --neutral-950:#1D1E20;
+    --neutral:#64748B; /* gris de marca Stitch: sustituye al gris genérico de Filament */
+    --neutral-50:#F8FAFC;
+    --neutral-100:#F1F5F9;
+    --neutral-200:#E2E8F0;
+    --neutral-300:#CBD5E1;
+    --neutral-400:#94A3B8;
+    --neutral-500:#64748B;
+    --neutral-600:#475569;
+    --neutral-700:#334155;
+    --neutral-800:#1E293B;
+    --neutral-900:#0F172A;
+    --neutral-950:#020617;
 
     --warning:#F59E0B;
     --warning-50:#FBF8F3;
@@ -115,51 +115,51 @@
        así: esto es organizar y documentar, no recolorear. Receta de "cómo cambio X" en
        docs/estilos.md. */
 
-    --fondo-pagina:#F4F6FA;   /* fondo general del panel, detrás de las tarjetas — .fi-body en
+    --fondo-pagina:#F5F7F6;   /* fondo general del panel, detrás de las tarjetas — .fi-body en
        theme.css lo lee directo de este token (no del slot 'gray' de Filament). */
     --fondo-tarjeta:#FFFFFF;  /* fondo de tarjetas/secciones: Sections, stat cards, modales,
        tablas y las tarjetas del POS. */
-    --borde-tarjeta:#E5E7EB;  /* borde de tarjetas/secciones y paneles flotantes (menú de usuario,
+    --borde-tarjeta:#E4E7EC;  /* borde de tarjetas/secciones y paneles flotantes (menú de usuario,
        notificaciones). */
     --sombra-tarjeta:0 1px 3px rgb(16 24 40 / 0.06), 0 1px 2px rgb(16 24 40 / 0.04); /* sombra de
        tarjetas/secciones y paneles flotantes. */
 
-    /*======== SIDEBAR (navy) ========
+    /*======== SIDEBAR (claro, marca Vendix) ========
        Único rincón "oscuro" del panel, a propósito: el resto del design-system se queda claro
        (--darkMode(false) en AdminPanelProvider) — esto es un riel de navegación con su propio
        color de marca, no un modo oscuro real, así que no necesita variantes .dark en ningún otro
        componente. Valores del diseño aprobado (ver tarea "Dashboard y Sidebar del diseño UI"). */
 
-    --fondo-sidebar:#0F172A;
-    --sidebar-item-texto:#CBD5E1;          /* ítem inactivo (slate-300) */
-    --sidebar-item-activo-fondo:#1E3A5F;
-    --sidebar-item-activo-texto:#FFFFFF;
-    --sidebar-grupo-label:#64748B;         /* labels de sección: Operaciones, Fiscal... */
-    --sidebar-borde:rgb(255 255 255 / 0.06);
-    --sidebar-hover-fondo:#1E293B;
-    --sidebar-brand-icono-fondo:#3B82F6;
-    --sidebar-brand-nombre:#FFFFFF;
-    --sidebar-brand-subtitulo:#94A3B8;     /* nombre de la empresa activa, bajo el brand */
-    --sidebar-usuario-nombre:#E2E8F0;
+    --fondo-sidebar:#FFFFFF;
+    --sidebar-item-texto:#475569;          /* ítem inactivo (slate-300) */
+    --sidebar-item-activo-fondo:#ECFDF6;
+    --sidebar-item-activo-texto:#0B6E51;
+    --sidebar-grupo-label:#94A3B8;         /* labels de sección: Operaciones, Fiscal... */
+    --sidebar-borde:#E8ECEF;
+    --sidebar-hover-fondo:#F1F5F9;
+    --sidebar-brand-icono-fondo:#0C8A63;
+    --sidebar-brand-nombre:#0B1B2B;
+    --sidebar-brand-subtitulo:#64748B;     /* nombre de la empresa activa, bajo el brand */
+    --sidebar-usuario-nombre:#0F172A;
     --sidebar-usuario-rol:#64748B;
 
     /* Barra superior (->topNavigation()): mismo navy que el sidebar, que sigue en uso como
        off-canvas en mobile. */
-    --topbar-fondo:#0F172A;
-    --topbar-borde:#334155;
-    --topbar-item-texto:#CBD5E1;
-    --topbar-item-hover-texto:#F1F5F9;
-    --topbar-item-hover-fondo:rgb(255 255 255 / 0.04);
-    --topbar-item-activo-texto:#FFFFFF;
-    --topbar-item-activo-borde:#3B82F6;
-    --topbar-dropdown-fondo:#1E293B;
-    --topbar-dropdown-item-hover-fondo:#334155;
-    --topbar-dropdown-item-activo-fondo:#1E3A5F;
+    --topbar-fondo:#FFFFFF;
+    --topbar-borde:#E8ECEF;
+    --topbar-item-texto:#475569;
+    --topbar-item-hover-texto:#0F172A;
+    --topbar-item-hover-fondo:#F1F5F9;
+    --topbar-item-activo-texto:#0B6E51;
+    --topbar-item-activo-borde:#0C8A63;
+    --topbar-dropdown-fondo:#FFFFFF;
+    --topbar-dropdown-item-hover-fondo:#F1F5F9;
+    --topbar-dropdown-item-activo-fondo:#ECFDF6;
 
     /*======== FORMAS ========*/
 
     --radius-sm:0.375rem;
-    --radius:0.625rem;
-    --radius-lg:1rem;
+    --radius:0.5rem;
+    --radius-lg:0.75rem;
 
 }

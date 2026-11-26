@@ -52,11 +52,9 @@ class AdminPanelProvider extends PanelProvider
             // normal con una sola empresa entra directo (getDefaultTenant) y no lo necesita, pero
             // no le estorba dejarlo visible.
             ->tenantMenu()
-            // Navegación en barra superior: cada grupo es un botón con dropdown y los ítems sin
-            // grupo (solo Dashboard) van como botón suelto. Por debajo de lg (1024px) Filament
-            // oculta la barra y vuelve al sidebar off-canvas con hamburguesa, así que el CSS del
-            // sidebar en theme.css sigue en uso en mobile/tablet.
-            ->topNavigation()
+            // Navegación en barra LATERAL (colapsable en escritorio) + barra superior compacta con
+            // búsqueda, empresa y usuario. Antes era ->topNavigation(), que se desbordaba en
+            // pantallas medianas.
             // Orden = orden en la barra (ver NavigationManager::get()); dentro de cada grupo
             // manda el $navigationSort de cada Resource/Page. Los grupos NO llevan ->icon(): el
             // sidebar de mobile lanza una excepción si un grupo tiene ícono y sus ítems también
@@ -75,11 +73,11 @@ class AdminPanelProvider extends PanelProvider
                     400 => '#2FC796', 500 => '#12A97C', 600 => '#0C8A63', 700 => '#0B6E51',
                     800 => '#0C5742', 900 => '#0B4737', 950 => '#04281F',
                 ],
-                'info' => Color::hex('#49BEFF'), // --secondary (rol "informativo" de Filament)
-                'success' => Color::hex('#13DEB9'), // --tertiary / --success
+                'info' => Color::hex('#0EA5E9'), // --secondary (rol "informativo" de Filament)
+                'success' => Color::hex('#16A34A'), // --tertiary / --success
                 'warning' => Color::hex('#F59E0B'), // --warning
                 'danger' => Color::hex('#EF4444'), // --danger
-                'gray' => Color::hex('#7C808D'), // --neutral: gris de marca Stitch, no el gris
+                'gray' => Color::hex('#64748B'), // --neutral: gris de marca Stitch, no el gris
                 // genérico de Filament — de aquí salen fondos, bordes y superficies del panel.
                 // Slot extra (no es uno de los 6 nativos de Filament) para la variante "Inverted"
                 // (oscuro sólido) de Stitch: se usa con ->color('dark') en una Action. Filament
@@ -111,7 +109,10 @@ class AdminPanelProvider extends PanelProvider
             // databaseNotifications desactivado: no se envían notificaciones de BD en el sistema y
             // el polling cada 30s genera tráfico innecesario al servidor.
             ->maxContentWidth(Width::Full)
-            ->sidebarCollapsibleOnDesktop(false)
+            ->sidebarCollapsibleOnDesktop()
+            ->sidebarWidth('16rem')
+            ->collapsedSidebarWidth('4.5rem')
+            ->favicon(asset('favicon.ico'))
             ->renderHook(
                 PanelsRenderHook::BODY_END,
                 fn () => new HtmlString('<script>try{let k="_x_collapsedGroups",v=localStorage.getItem(k);if(v&&v!=="[]"){localStorage.removeItem(k)}}catch(e){}</script>'),

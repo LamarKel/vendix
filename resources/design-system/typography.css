@@ -1,6 +1,6 @@
 :root{
 
-    --font-headline:'Manrope',sans-serif;
+    --font-headline:'Inter',sans-serif; /* Vendix: una sola familia; titulares en 700-800 */
     --font-body:'Inter',sans-serif;
     --font-family:var(--font-body); /* alias: el resto del design-system (botones, tablas,
        formularios, POS) referencia --font-family para el texto de cuerpo */

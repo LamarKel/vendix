@@ -1560,10 +1560,18 @@ class PuntoDeVenta extends Page
     // Pedidos a caja
     // ──────────────────────────────────────────────────────────────────────
 
+    /**
+     * Con el módulo de pedidos encendido, quien puede cobrar en ESTA pantalla puede cobrar los
+     * pedidos en espera (o quien tenga pedidos.cobrar explícito). Así la opción sale en los tres
+     * puntos de venta sin depender de que cada rol tenga el permiso aparte.
+     */
     public function puedeCobrarPedidos(): bool
     {
-        return $this->empresa()->tieneModulo(Modulo::VENTAS_PEDIDOS)
-            && (bool) auth()->user()?->can('pedidos.cobrar');
+        $usuario = auth()->user();
+
+        return $usuario !== null
+            && $this->empresa()->tieneModulo(Modulo::VENTAS_PEDIDOS)
+            && ($usuario->can('pedidos.cobrar') || static::puedeAccederPorPermiso());
     }
 
     /** @return \Illuminate\Database\Eloquent\Collection<int, \App\Models\PedidoVenta> */

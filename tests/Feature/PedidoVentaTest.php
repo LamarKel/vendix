@@ -377,4 +377,22 @@ class PedidoVentaTest extends TestCase
 
         Livewire::actingAs($this->admin)->test(PuntoDeVenta::class)->set('pedidoId', 999);
     }
+
+    /** Quien puede cobrar en la pantalla ve los pedidos, aunque su rol no tenga pedidos.cobrar. */
+    public function test_un_cajero_con_acceso_al_pos_ve_los_pedidos_sin_permiso_aparte(): void
+    {
+        $pedido = $this->crearPedido('Ana Ruiz');
+        \Spatie\Permission\Models\Permission::firstOrCreate(['name' => 'pos.acceder', 'guard_name' => 'web']);
+        $rol = \App\Models\Role::firstOrCreate(['empresa_id' => $this->empresaDefault->id, 'name' => 'Solo caja', 'guard_name' => 'web']);
+        $rol->syncPermissions(['pos.acceder']);
+        $cajero = User::factory()->create();
+        $cajero->assignRole('Solo caja');
+        app(ArqueoCajaService::class)->abrir('0', $cajero->id, $this->empresaDefault);
+
+        Livewire::actingAs($cajero)
+            ->test(\App\Filament\Pages\Caja::class)
+            ->assertSee('Ana Ruiz')
+            ->call('cargarPedido', $pedido->id)
+            ->assertSet('pedidoId', $pedido->id);
+    }
 }

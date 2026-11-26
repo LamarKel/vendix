@@ -274,4 +274,23 @@ class CotizacionTest extends TestCase
         $esperada = now()->addDays(30)->toDateString();
         $this->assertEquals($esperada, $cotizacion->fecha_vencimiento->toDateString());
     }
+
+    /** El buscador agrega la línea (o suma 1 si ya está) y la cotización se crea con ella. */
+    public function test_el_buscador_de_productos_agrega_lineas_a_la_tabla(): void
+    {
+        \Filament\Facades\Filament::setTenant($this->empresa);
+
+        $pagina = \Livewire\Livewire::test(\App\Filament\Resources\CotizacionResource\Pages\CreateCotizacion::class)
+            ->fillForm(['buscar_producto' => $this->producto->id])
+            ->fillForm(['buscar_producto' => $this->producto->id]);
+
+        $lineas = array_values($pagina->get('data.lineas'));
+        $this->assertCount(1, $lineas);
+        $this->assertEquals(2, $lineas[0]['cantidad']);
+        $this->assertEquals(150, (float) $lineas[0]['precio_unitario']);
+        $this->assertNull($pagina->get('data.buscar_producto'));
+
+        $pagina->call('create')->assertHasNoFormErrors();
+        $this->assertDatabaseHas('detalle_cotizaciones', ['producto_id' => $this->producto->id]);
+    }
 }

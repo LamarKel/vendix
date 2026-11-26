@@ -43,6 +43,8 @@ class CotizacionResource extends Resource
 
     protected static ?string $navigationLabel = 'Cotizaciones';
 
+    protected static ?string $slug = 'cotizaciones';
+
     protected static ?string $pluralModelLabel = 'Cotizaciones';
 
     protected static ?string $modelLabel = 'Cotización';
@@ -56,97 +58,180 @@ class CotizacionResource extends Resource
     {
         $empresaId = Filament::getTenant()?->id;
 
+        // Mismo esquema que Facturación: tarjeta con los datos del cliente arriba, buscador de
+        // productos y debajo la tabla donde se van agregando las líneas.
         return $schema->components([
-            Section::make('Datos generales')->schema([
-                Select::make('cliente_id')
-                    ->label('Cliente')
-                    ->options(fn () => Cliente::where('empresa_id', $empresaId)
-                        ->where('activo', true)
-                        ->pluck('nombre', 'id'))
-                    ->searchable()
-                    ->placeholder('Sin cliente (cotización genérica)'),
+            Section::make('Cliente')
+                ->icon(Heroicon::OutlinedUser)
+                ->schema([
+                    Select::make('cliente_id')
+                        ->label('Cliente')
+                        ->options(fn () => Cliente::where('empresa_id', $empresaId)
+                            ->where('activo', true)
+                            ->get()
+                            ->mapWithKeys(fn (Cliente $c) => [$c->id => $c->documento ? "{$c->nombre} · {$c->documento}" : $c->nombre]))
+                        ->searchable()
+                        ->placeholder('Sin cliente (cotización genérica)')
+                        ->columnSpan(2),
 
-                DatePicker::make('fecha')
-                    ->label('Fecha')
-                    ->default(fn () => now()->toDateString())
-                    ->required(),
+                    DatePicker::make('fecha')
+                        ->label('Fecha')
+                        ->default(fn () => now()->toDateString())
+                        ->required(),
 
-                TextInput::make('dias_vigencia')
-                    ->label('Días de vigencia')
-                    ->numeric()
-                    ->default(15)
-                    ->minValue(1)
-                    ->required(),
+                    TextInput::make('dias_vigencia')
+                        ->label('Vigencia (días)')
+                        ->numeric()
+                        ->default(15)
+                        ->minValue(1)
+                        ->required(),
 
-                Select::make('condiciones_pago')
-                    ->label('Condiciones de pago')
-                    ->options([
-                        'Contado' => 'Contado',
-                        'Crédito 15 días' => 'Crédito 15 días',
-                        'Crédito 30 días' => 'Crédito 30 días',
-                        'Crédito 60 días' => 'Crédito 60 días',
-                    ])
-                    ->placeholder('Seleccionar...'),
+                    Select::make('condiciones_pago')
+                        ->label('Condiciones de pago')
+                        ->options([
+                            'Contado' => 'Contado',
+                            'Crédito 15 días' => 'Crédito 15 días',
+                            'Crédito 30 días' => 'Crédito 30 días',
+                            'Crédito 60 días' => 'Crédito 60 días',
+                        ])
+                        ->placeholder('Seleccionar...')
+                        ->columnSpan(2),
 
-                Textarea::make('notas')
-                    ->label('Notas / Observaciones')
-                    ->rows(2)
-                    ->columnSpanFull(),
-            ])->columns(2),
+                    Textarea::make('notas')
+                        ->label('Notas / Observaciones')
+                        ->rows(1)
+                        ->autosize()
+                        ->columnSpan(2),
+                ])
+                ->columns(4)
+                ->columnSpanFull(),
 
-            Section::make('Productos')->schema([
-                Repeater::make('lineas')
-                    ->label('')
-                    ->schema([
-                        Select::make('producto_id')
-                            ->label('Producto')
-                            ->options(fn () => Producto::where('empresa_id', $empresaId)
-                                ->where('activo', true)
-                                ->pluck('nombre', 'id'))
-                            ->searchable()
-                            ->required()
-                            ->live()
-                            ->afterStateUpdated(function ($state, callable $set, callable $get) use ($empresaId) {
-                                if (! $state) {
+            Section::make('Productos')
+                ->icon(Heroicon::OutlinedShoppingCart)
+                ->schema([
+                    // Buscador: no se guarda; al elegir un producto agrega (o suma) su línea.
+                    Select::make('buscar_producto')
+                        ->hiddenLabel()
+                        ->placeholder('Buscar producto por nombre o código y presiona Enter…')
+                        ->prefixIcon(Heroicon::MagnifyingGlass)
+                        ->searchable()
+                        ->getSearchResultsUsing(fn (string $search) => Producto::where('empresa_id', $empresaId)
+                            ->where('activo', true)
+                            ->where(fn ($q) => $q->where('nombre', 'ilike', "%{$search}%")->orWhere('codigo', 'ilike', "%{$search}%"))
+                            ->orderBy('nombre')
+                            ->limit(15)
+                            ->get()
+                            ->mapWithKeys(fn (Producto $p) => [$p->id => "{$p->codigo} — {$p->nombre} · RD$ ".number_format((float) $p->precio, 2)]))
+                        ->getOptionLabelUsing(fn ($value) => Producto::where('empresa_id', $empresaId)->find($value)?->nombre)
+                        ->dehydrated(false)
+                        ->live()
+                        ->afterStateUpdated(function ($state, callable $set, callable $get) use ($empresaId) {
+                            if (! $state) {
+                                return;
+                            }
+
+                            $producto = Producto::where('empresa_id', $empresaId)->where('activo', true)->find($state);
+                            $set('buscar_producto', null);
+
+                            if (! $producto) {
+                                return;
+                            }
+
+                            $lineas = $get('lineas') ?? [];
+
+                            foreach ($lineas as $clave => $linea) {
+                                if ((int) ($linea['producto_id'] ?? 0) === $producto->id) {
+                                    $lineas[$clave]['cantidad'] = (float) ($linea['cantidad'] ?? 0) + 1;
+                                    $set('lineas', $lineas);
+
                                     return;
                                 }
+                            }
 
-                                $producto = Producto::where('empresa_id', $empresaId)->find($state);
+                            $lineas[(string) \Illuminate\Support\Str::uuid()] = [
+                                'producto_id' => $producto->id,
+                                'cantidad' => 1,
+                                'precio_unitario' => $producto->precio,
+                                'descuento' => 0,
+                            ];
+                            $set('lineas', $lineas);
+                        }),
 
-                                if (! $producto) {
-                                    return;
-                                }
+                    Repeater::make('lineas')
+                        ->hiddenLabel()
+                        ->table([
+                            Repeater\TableColumn::make('Producto'),
+                            Repeater\TableColumn::make('Cantidad')->width('120px'),
+                            Repeater\TableColumn::make('Precio unitario')->width('170px'),
+                            Repeater\TableColumn::make('Descuento')->width('150px'),
+                            Repeater\TableColumn::make('Importe')->width('140px'),
+                        ])
+                        ->schema([
+                            Select::make('producto_id')
+                                ->hiddenLabel()
+                                ->options(fn () => Producto::where('empresa_id', $empresaId)
+                                    ->where('activo', true)
+                                    ->pluck('nombre', 'id'))
+                                ->searchable()
+                                ->required()
+                                ->live()
+                                ->afterStateUpdated(function ($state, callable $set) use ($empresaId) {
+                                    $producto = $state ? Producto::where('empresa_id', $empresaId)->find($state) : null;
+                                    if ($producto) {
+                                        $set('precio_unitario', $producto->precio);
+                                    }
+                                }),
 
-                                $precio = $producto->precio;
+                            TextInput::make('cantidad')
+                                ->hiddenLabel()
+                                ->numeric()
+                                ->minValue(0.0001)
+                                ->default(1)
+                                ->live(onBlur: true)
+                                ->required(),
 
-                                $set('precio_unitario', $precio);
-                            }),
+                            TextInput::make('precio_unitario')
+                                ->hiddenLabel()
+                                ->numeric()
+                                ->prefix('RD$')
+                                ->minValue(0)
+                                ->live(onBlur: true)
+                                ->required(),
 
-                        TextInput::make('cantidad')
-                            ->label('Cantidad')
-                            ->numeric()
-                            ->minValue(0.0001)
-                            ->default(1)
-                            ->required(),
+                            TextInput::make('descuento')
+                                ->hiddenLabel()
+                                ->numeric()
+                                ->prefix('RD$')
+                                ->live(onBlur: true)
+                                ->default(0),
 
-                        TextInput::make('precio_unitario')
-                            ->label('Precio unitario')
-                            ->numeric()
-                            ->prefix('RD$')
-                            ->minValue(0)
-                            ->required(),
+                            \Filament\Forms\Components\Placeholder::make('importe')
+                                ->hiddenLabel()
+                                ->content(fn (callable $get) => 'RD$ '.number_format(
+                                    max(0, (float) $get('cantidad') * (float) $get('precio_unitario') - (float) $get('descuento')), 2)),
+                        ])
+                        ->defaultItems(0)
+                        ->addable(false)
+                        ->reorderable(false)
+                        ->deleteAction(fn ($action) => $action->tooltip('Quitar')),
 
-                        TextInput::make('descuento')
-                            ->label('Descuento')
-                            ->numeric()
-                            ->prefix('RD$')
-                            ->default(0),
-                    ])
-                    ->columns(4)
-                    ->defaultItems(1)
-                    ->addActionLabel('Agregar producto')
-                    ->reorderable(false),
-            ]),
+                    \Filament\Forms\Components\Placeholder::make('resumen')
+                        ->hiddenLabel()
+                        ->content(function (callable $get) {
+                            $lineas = collect($get('lineas') ?? []);
+                            if ($lineas->isEmpty()) {
+                                return new \Illuminate\Support\HtmlString('<div style="text-align:center;padding:1.5rem;color:#94A3B8">Busca un producto arriba para agregarlo a la cotización.</div>');
+                            }
+                            $subtotal = $lineas->sum(fn ($l) => max(0, (float) ($l['cantidad'] ?? 0) * (float) ($l['precio_unitario'] ?? 0) - (float) ($l['descuento'] ?? 0)));
+
+                            return new \Illuminate\Support\HtmlString(
+                                '<div style="display:flex;justify-content:flex-end;gap:1.5rem;align-items:baseline">'
+                                .'<span style="color:#64748B">'.$lineas->count().' '.($lineas->count() === 1 ? 'línea' : 'líneas').' · Subtotal (antes de ITBIS)</span>'
+                                .'<strong style="font-size:1.4rem">RD$ '.number_format($subtotal, 2).'</strong></div>'
+                            );
+                        }),
+                ])
+                ->columnSpanFull(),
         ]);
     }
 
